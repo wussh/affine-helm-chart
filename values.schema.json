@@ -1,10 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["application", "migration", "image", "secrets", "persistence", "resources", "migrationResources"],
+  "required": ["application", "migration", "prerequisites", "image", "secrets", "persistence", "resources", "migrationResources"],
   "properties": {
     "application": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
     "migration": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
+    "prerequisites": {"type": "object", "required": ["enabled", "database", "redis"], "properties": {"enabled": {"type": "boolean"}, "database": {"type": "object", "required": ["name", "namespace", "userSecretName", "version", "storageClass", "storageSize", "replicas"], "properties": {"name": {"type": "string", "minLength": 1}, "namespace": {"type": "string", "minLength": 1}, "userSecretName": {"type": "string", "minLength": 1}, "version": {"type": "string", "pattern": "^16\\.[0-9]+$"}, "storageClass": {"type": "string", "minLength": 1}, "storageSize": {"type": "string", "minLength": 1}, "replicas": {"type": "integer", "minimum": 1, "maximum": 1}}}, "redis": {"type": "object", "required": ["enabled", "name", "image", "storageClass", "storageSize"], "properties": {"enabled": {"type": "boolean"}, "name": {"type": "string", "minLength": 1}, "image": {"type": "string", "pattern": "^docker.io/library/redis@sha256:[a-f0-9]{64}$"}, "storageClass": {"type": "string", "minLength": 1}, "storageSize": {"type": "string", "minLength": 1}}}}},
     "replicaCount": {"type": "integer", "minimum": 1, "maximum": 1},
     "image": {
       "type": "object", "required": ["repository", "tag", "digest", "pullPolicy"],
@@ -19,7 +20,7 @@
       "type": "object", "required": ["mode", "database", "redis"],
       "properties": {
         "mode": {"enum": ["existing", "create"]},
-        "database": {"type": "object", "required": ["name", "data"], "properties": {"name": {"type": "string", "minLength": 1}, "data": {"type": "object", "required": ["DATABASE_URL"], "properties": {"DATABASE_URL": {"type": "string"}}}}},
+        "database": {"type": "object", "required": ["name", "data"], "properties": {"name": {"type": "string", "minLength": 1}, "data": {"type": "object", "required": ["DATABASE_URL"], "properties": {"DATABASE_URL": {"type": "string"}, "POSTGRES_USERNAME": {"type": "string"}, "POSTGRES_PASSWORD": {"type": "string"}}}}},
         "redis": {"type": "object", "required": ["name", "data"], "properties": {"name": {"type": "string", "minLength": 1}, "data": {"type": "object", "required": ["REDIS_SERVER_HOST", "REDIS_SERVER_PORT", "REDIS_SERVER_USERNAME", "REDIS_SERVER_PASSWORD", "REDIS_SERVER_DATABASE"], "properties": {"REDIS_SERVER_HOST": {"type": "string", "minLength": 1}, "REDIS_SERVER_PORT": {"type": "string", "minLength": 1}, "REDIS_SERVER_USERNAME": {"type": "string", "minLength": 1}, "REDIS_SERVER_PASSWORD": {"type": "string"}, "REDIS_SERVER_DATABASE": {"type": "string", "minLength": 1}}}}}
       }
     },

@@ -5,6 +5,23 @@ application:
 migration:
   enabled: true
 
+prerequisites:
+  enabled: false
+  database:
+    name: db-affine
+    namespace: prod
+    userSecretName: everest-secrets-db-affine
+    version: "16.4"
+    storageClass: storage-nvme-c1
+    storageSize: 25Gi
+    replicas: 1
+  redis:
+    enabled: true
+    name: affine-redis
+    image: docker.io/library/redis@sha256:bb142a9c18ac18a16713c1491d779697b4e107c22a97266616099d288237ef47
+    storageClass: storage-nvme-c1
+    storageSize: 5Gi
+
 image:
   repository: ghcr.io/toeverything/affine
   tag: "0.27.4"
@@ -17,6 +34,8 @@ secrets:
     name: affine-database
     data:
       DATABASE_URL: ""
+      POSTGRES_USERNAME: ""
+      POSTGRES_PASSWORD: ""
   redis:
     name: affine-redis
     data:

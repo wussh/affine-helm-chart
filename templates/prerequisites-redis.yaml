@@ -1,0 +1,51 @@
+{{- if and .Values.prerequisites.enabled .Values.prerequisites.redis.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.prerequisites.redis.name }}
+  annotations: {argocd.argoproj.io/sync-wave: "-1", helm.sh/resource-policy: keep}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.prerequisites.redis.storageClass }}
+  resources:
+    requests: {storage: {{ .Values.prerequisites.redis.storageSize }}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.prerequisites.redis.name }}
+  annotations: {argocd.argoproj.io/sync-wave: "-1"}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: {{ .Values.prerequisites.redis.name }}}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: {{ .Values.prerequisites.redis.name }}}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: redis
+          image: {{ .Values.prerequisites.redis.image }}
+          args: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)", "--appendonly", "yes"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_PASSWORD}}
+          ports: [{name: redis, containerPort: 6379}]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          readinessProbe: {tcpSocket: {port: redis}, periodSeconds: 10}
+          livenessProbe: {tcpSocket: {port: redis}, periodSeconds: 20}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts: [{name: data, mountPath: /data}]
+      volumes: [{name: data, persistentVolumeClaim: {claimName: {{ .Values.prerequisites.redis.name }}}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.prerequisites.redis.name }}
+  annotations: {argocd.argoproj.io/sync-wave: "-1"}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: {{ .Values.prerequisites.redis.name }}}
+  ports: [{name: redis, port: 6379, targetPort: redis}]
+{{- end }}

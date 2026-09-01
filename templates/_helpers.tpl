@@ -15,4 +15,8 @@
 {{- $_ := required (printf "secrets.redis.data.%s is required" $key) (index $.Values.secrets.redis.data $key) -}}
 {{- end -}}
 {{- end -}}
+{{- if and .Values.prerequisites.enabled (eq .Values.secrets.mode "create") -}}
+{{- $_ := required "secrets.database.data.POSTGRES_USERNAME is required when creating prerequisites" .Values.secrets.database.data.POSTGRES_USERNAME -}}
+{{- $_ := required "secrets.database.data.POSTGRES_PASSWORD is required when creating prerequisites" .Values.secrets.database.data.POSTGRES_PASSWORD -}}
+{{- end -}}
 {{- end }}

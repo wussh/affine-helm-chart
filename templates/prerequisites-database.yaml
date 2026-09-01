@@ -1,0 +1,33 @@
+{{- if .Values.prerequisites.enabled }}
+apiVersion: everest.percona.com/v1alpha1
+kind: DatabaseCluster
+metadata:
+  name: {{ .Values.prerequisites.database.name }}
+  namespace: {{ .Values.prerequisites.database.namespace }}
+  annotations: {argocd.argoproj.io/sync-wave: "-2"}
+spec:
+  allowUnsafeConfiguration: true
+  backup:
+    enabled: false
+    pitr:
+      enabled: false
+  engine:
+    type: postgresql
+    version: {{ .Values.prerequisites.database.version | quote }}
+    replicas: {{ .Values.prerequisites.database.replicas }}
+    resources:
+      cpu: "1"
+      memory: 2G
+    storage:
+      class: {{ .Values.prerequisites.database.storageClass }}
+      size: {{ .Values.prerequisites.database.storageSize }}
+    userSecretsName: {{ .Values.prerequisites.database.userSecretName }}
+  proxy:
+    type: pgbouncer
+    replicas: 1
+    expose:
+      type: ClusterIP
+    resources:
+      cpu: 500m
+      memory: 512Mi
+{{- end }}
