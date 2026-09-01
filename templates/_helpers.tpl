@@ -7,7 +7,7 @@
 {{- define "affine.validateSecrets" -}}
 {{- $_ := include "affine.databaseSecretName" . -}}
 {{- $_ := include "affine.redisSecretName" . -}}
-{{- if eq .Values.secrets.mode "create" }}
+{{- if and (eq .Values.secrets.mode "create") (eq .Values.prerequisites.database.mode "external") }}
 {{- range $key := list "DATABASE_URL" }}
 {{- $_ := required (printf "secrets.database.data.%s is required" $key) (index $.Values.secrets.database.data $key) -}}
 {{- end }}
@@ -15,8 +15,11 @@
 {{- $_ := required (printf "secrets.redis.data.%s is required" $key) (index $.Values.secrets.redis.data $key) -}}
 {{- end -}}
 {{- end -}}
-{{- if and .Values.prerequisites.enabled (eq .Values.secrets.mode "create") -}}
+{{- if and .Values.prerequisites.enabled (eq .Values.secrets.mode "create") (ne .Values.prerequisites.database.mode "external") -}}
 {{- $_ := required "secrets.database.data.POSTGRES_USERNAME is required when creating prerequisites" .Values.secrets.database.data.POSTGRES_USERNAME -}}
 {{- $_ := required "secrets.database.data.POSTGRES_PASSWORD is required when creating prerequisites" .Values.secrets.database.data.POSTGRES_PASSWORD -}}
 {{- end -}}
+{{- end }}
+{{- define "affine.migrationChecksum" -}}
+{{- toJson (dict "image" .Values.image.digest "migration" .Values.migration "resources" .Values.migrationResources "databaseSecret" .Values.secrets.database.name "redisSecret" .Values.secrets.redis.name) | sha256sum | trunc 8 -}}
 {{- end }}

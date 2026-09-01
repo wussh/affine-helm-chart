@@ -1,4 +1,4 @@
-{{- if .Values.prerequisites.enabled }}
+{{- if and .Values.prerequisites.enabled (eq .Values.prerequisites.database.mode "everest") }}
 apiVersion: everest.percona.com/v1alpha1
 kind: DatabaseCluster
 metadata:

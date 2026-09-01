@@ -1,8 +1,9 @@
 {{- if .Values.migration.enabled }}
+{{- $checksum := include "affine.migrationChecksum" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: affine-migration-0-27-4
+  name: affine-migration-{{ .Chart.AppVersion | replace "." "-" }}-{{ $checksum }}
   annotations: {argocd.argoproj.io/sync-wave: "1"}
 spec:
   backoffLimit: 2

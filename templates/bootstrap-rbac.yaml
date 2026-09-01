@@ -1,0 +1,63 @@
+{{- if and .Values.prerequisites.enabled (eq .Values.secrets.mode "create") (ne .Values.prerequisites.database.mode "external") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "affine.fullname" . }}-bootstrap
+  annotations: {argocd.argoproj.io/sync-wave: "-1"}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "affine.fullname" . }}-bootstrap-source
+  namespace: {{ .Values.prerequisites.database.namespace }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ .Values.prerequisites.database.userSecretName }}]
+    verbs: [get]
+  {{- if eq .Values.prerequisites.database.mode "everest" }}
+  - apiGroups: [everest.percona.com]
+    resources: [databaseclusters]
+    resourceNames: [{{ .Values.prerequisites.database.name }}]
+    verbs: [get]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "affine.fullname" . }}-bootstrap-source
+  namespace: {{ .Values.prerequisites.database.namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "affine.fullname" . }}-bootstrap
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "affine.fullname" . }}-bootstrap-source
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "affine.fullname" . }}-bootstrap-target
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ include "affine.databaseSecretName" . }}]
+    verbs: [get, patch, update]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "affine.fullname" . }}-bootstrap-target
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "affine.fullname" . }}-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "affine.fullname" . }}-bootstrap-target
+{{- end }}

@@ -4,10 +4,12 @@ application:
   enabled: false
 migration:
   enabled: true
+  templateRevision: "1"
 
 prerequisites:
   enabled: false
   database:
+    mode: everest
     name: db-affine
     namespace: prod
     userSecretName: everest-secrets-db-affine
@@ -15,6 +17,12 @@ prerequisites:
     storageClass: storage-nvme-c1
     storageSize: 25Gi
     replicas: 1
+    container:
+      image: docker.io/library/postgres@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
+      database: postgres
+  bootstrap:
+    image: docker.io/alpine/k8s@sha256:b0523f0a244ddc4c8e055aa335c040d3d78b3ead5528f4544395f7f9f69c7b68
+    activeDeadlineSeconds: 900
   redis:
     enabled: true
     name: affine-redis
