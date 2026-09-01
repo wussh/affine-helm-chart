@@ -11,7 +11,7 @@ helm template dev-affine .
 
 The image uses a verified manifest digest. PostgreSQL, Redis, and PVCs remain platform-managed. Set `secrets.mode=existing` to reference pre-created Secrets, or `secrets.mode=create` to have the chart render them from supplied values. Never commit credentials.
 
-Set `prerequisites.enabled=true` to additionally render an Everest PostgreSQL `DatabaseCluster`, Redis Deployment, Redis PVC, and Redis Service. With `secrets.mode=create`, provide `POSTGRES_USERNAME` and `POSTGRES_PASSWORD`; with `existing`, create the Everest user Secret separately. The prerequisite mode does not create object-store backup credentials.
+Set `prerequisites.enabled=true` to additionally render an Everest PostgreSQL `DatabaseCluster`, Redis Deployment, Redis PVC, and Redis Service. With `secrets.mode=create`, provide `POSTGRES_USERNAME` and `POSTGRES_PASSWORD`; the Everest user Secret is created once, then retained for operator ownership. With `existing`, create the Everest user Secret separately. The prerequisite mode does not create object-store backup credentials.
 
 ## Release
 

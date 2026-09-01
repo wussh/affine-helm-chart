@@ -17,6 +17,11 @@ metadata:
   annotations: {argocd.argoproj.io/sync-wave: "-1"}
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector: {matchLabels: {app.kubernetes.io/name: {{ .Values.prerequisites.redis.name }}}}
   template:
     metadata: {labels: {app.kubernetes.io/name: {{ .Values.prerequisites.redis.name }}}}
@@ -25,7 +30,8 @@ spec:
       containers:
         - name: redis
           image: {{ .Values.prerequisites.redis.image }}
-          args: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)", "--appendonly", "yes"]
+          command: [sh, -c]
+          args: ['exec redis-server --requirepass "$REDIS_PASSWORD" --appendonly yes']
           env:
             - name: REDIS_PASSWORD
               valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_PASSWORD}}
