@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["application", "migration", "image", "secrets", "persistence", "resources", "migrationResources"],
+  "properties": {
+    "application": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
+    "migration": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
+    "replicaCount": {"type": "integer", "minimum": 1, "maximum": 1},
+    "image": {
+      "type": "object", "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "pattern": "^0\\.27\\.4$"},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "pullPolicy": {"type": "string"}
+      }
+    },
+    "secrets": {
+      "type": "object", "required": ["mode", "database", "redis"],
+      "properties": {
+        "mode": {"enum": ["existing", "create"]},
+        "database": {"type": "object", "required": ["name", "data"], "properties": {"name": {"type": "string", "minLength": 1}, "data": {"type": "object", "required": ["DATABASE_URL"], "properties": {"DATABASE_URL": {"type": "string"}}}}},
+        "redis": {"type": "object", "required": ["name", "data"], "properties": {"name": {"type": "string", "minLength": 1}, "data": {"type": "object", "required": ["REDIS_SERVER_HOST", "REDIS_SERVER_PORT", "REDIS_SERVER_USERNAME", "REDIS_SERVER_PASSWORD", "REDIS_SERVER_DATABASE"], "properties": {"REDIS_SERVER_HOST": {"type": "string", "minLength": 1}, "REDIS_SERVER_PORT": {"type": "string", "minLength": 1}, "REDIS_SERVER_USERNAME": {"type": "string", "minLength": 1}, "REDIS_SERVER_PASSWORD": {"type": "string"}, "REDIS_SERVER_DATABASE": {"type": "string", "minLength": 1}}}}}
+      }
+    },
+    "persistence": {"type": "object", "required": ["storage", "config"], "properties": {"storage": {"type": "object", "required": ["existingClaim", "size", "storageClass"]}, "config": {"type": "object", "required": ["existingClaim", "size", "storageClass"]}}},
+    "resources": {"type": "object"},
+    "migrationResources": {"type": "object"}
+  }
+}

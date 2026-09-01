@@ -1,0 +1,11 @@
+{{- if .Values.application.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "affine.fullname" . }}
+  annotations: {argocd.argoproj.io/sync-wave: "2"}
+spec:
+  type: {{ .Values.service.type }}
+  selector: {app.kubernetes.io/name: affine}
+  ports: [{name: http, port: {{ .Values.service.port }}, targetPort: http}]
+{{- end }}

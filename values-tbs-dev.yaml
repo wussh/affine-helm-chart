@@ -1,0 +1,4 @@
+application:
+  enabled: false
+migration:
+  enabled: true

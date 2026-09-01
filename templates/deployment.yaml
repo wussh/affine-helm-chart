@@ -1,0 +1,41 @@
+{{- if .Values.application.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "affine.fullname" . }}
+  annotations: {argocd.argoproj.io/sync-wave: "2"}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector: {matchLabels: {app.kubernetes.io/name: affine}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: affine}}
+    spec:
+      serviceAccountName: {{ include "affine.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      containers:
+        - name: affine
+          image: {{ include "affine.image" . }}
+          ports: [{name: http, containerPort: 3010}]
+          env:
+            - name: AFFINE_CONFIG_PATH
+              value: /root/.affine/config
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ include "affine.databaseSecretName" . }}, key: DATABASE_URL}}
+            {{- range $key := list "REDIS_SERVER_HOST" "REDIS_SERVER_PORT" "REDIS_SERVER_USERNAME" "REDIS_SERVER_PASSWORD" "REDIS_SERVER_DATABASE" }}
+            - name: {{ $key }}
+              valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" $ }}, key: {{ $key }}}}
+            {{- end }}
+          startupProbe: {{- toYaml .Values.probes.startup | nindent 12 }}
+          readinessProbe: {{- toYaml .Values.probes.readiness | nindent 12 }}
+          livenessProbe: {{- toYaml .Values.probes.liveness | nindent 12 }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - {name: storage, mountPath: /root/.affine/storage}
+            - {name: config, mountPath: /root/.affine/config}
+            - {name: config-file, mountPath: /root/.affine/config/config.json, subPath: config.json, readOnly: true}
+      volumes:
+        - {name: storage, persistentVolumeClaim: {claimName: {{ .Values.persistence.storage.existingClaim }}}}
+        - {name: config, persistentVolumeClaim: {claimName: {{ .Values.persistence.config.existingClaim }}}}
+        - {name: config-file, configMap: {name: {{ include "affine.fullname" . }}-config}}
+{{- end }}

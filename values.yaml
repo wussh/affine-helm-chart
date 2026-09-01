@@ -1,0 +1,96 @@
+replicaCount: 1
+
+application:
+  enabled: false
+migration:
+  enabled: true
+
+image:
+  repository: ghcr.io/toeverything/affine
+  tag: "0.27.4"
+  digest: sha256:b649f5ce2384ffdf13c23bccf81d759e15973d59d0b0058af65d895a84373099
+  pullPolicy: IfNotPresent
+
+secrets:
+  mode: existing
+  database:
+    name: affine-database
+    data:
+      DATABASE_URL: ""
+  redis:
+    name: affine-redis
+    data:
+      REDIS_SERVER_HOST: affine-redis
+      REDIS_SERVER_PORT: "6379"
+      REDIS_SERVER_USERNAME: default
+      REDIS_SERVER_PASSWORD: ""
+      REDIS_SERVER_DATABASE: "0"
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "4"
+    memory: "4Gi"
+migrationResources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+migrationActiveDeadlineSeconds: 900
+
+serviceAccount:
+  create: true
+  name: ""
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+
+persistence:
+  storage:
+    existingClaim: affine-storage
+    size: 20Gi
+    storageClass: storage-nvme-c1
+  config:
+    existingClaim: affine-config
+    size: 1Gi
+    storageClass: storage-nvme-c1
+
+probes:
+  startup:
+    httpGet: {path: /api/health, port: 3010}
+    failureThreshold: 30
+    periodSeconds: 10
+  readiness:
+    httpGet: {path: /api/health, port: 3010}
+    periodSeconds: 10
+  liveness:
+    httpGet: {path: /api/health, port: 3010}
+    periodSeconds: 20
+
+service:
+  type: ClusterIP
+  port: 3010
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: lets-encrypt-http-issuer
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  host: affine.dev.tbs.cloudeka.xyz
+  tlsSecretName: affine-tls
+
+config:
+  serverName: AFFiNE Internal
+  externalUrl: https://affine.dev.tbs.cloudeka.xyz

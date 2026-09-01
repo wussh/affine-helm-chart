@@ -1,0 +1,9 @@
+{{- include "affine.validateSecrets" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "affine.fullname" . }}-config
+  annotations: {argocd.argoproj.io/sync-wave: "0"}
+data:
+  config.json: |-
+    {"$schema":"https://github.com/toeverything/AFFiNE/releases/download/v0.27.4/config.schema.json","server":{"name":"{{ .Values.config.serverName }}","externalUrl":"{{ .Values.config.externalUrl }}"}}

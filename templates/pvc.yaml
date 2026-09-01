@@ -1,0 +1,15 @@
+{{- range $claim := list .Values.persistence.storage .Values.persistence.config }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ required "persistence.existingClaim is required" $claim.existingClaim }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ $claim.storageClass }}
+  resources:
+    requests: {storage: {{ $claim.size }}}
+---
+{{- end }}
