@@ -98,17 +98,23 @@ service:
   type: ClusterIP
   port: 3010
 
-ingress:
-  enabled: false
-  className: nginx
-  annotations:
-    cert-manager.io/cluster-issuer: lets-encrypt-http-issuer
-    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+routing:
+  mode: none
   host: affine.dev.tbs.cloudeka.xyz
-  tlsSecretName: affine-tls
+  ingress:
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: lets-encrypt-http-issuer
+      nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    tlsSecretName: affine-tls
+  gateway:
+    name: gateway-external
+    namespace: kgateway-system
+    httpSectionName: http
+    httpsSectionName: https
 
 config:
   serverName: AFFiNE Internal

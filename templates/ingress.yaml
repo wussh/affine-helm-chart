@@ -1,16 +1,16 @@
-{{- if and .Values.application.enabled .Values.ingress.enabled }}
+{{- if and .Values.application.enabled (eq .Values.routing.mode "ingress") }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "affine.fullname" . }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
-    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+    {{- toYaml .Values.routing.ingress.annotations | nindent 4 }}
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
-  tls: [{secretName: {{ .Values.ingress.tlsSecretName }}, hosts: [{{ .Values.ingress.host }}]}]
+  ingressClassName: {{ .Values.routing.ingress.className }}
+  tls: [{secretName: {{ .Values.routing.ingress.tlsSecretName }}, hosts: [{{ .Values.routing.host }}]}]
   rules:
-    - host: {{ .Values.ingress.host }}
+    - host: {{ .Values.routing.host }}
       http:
         paths: [{path: /, pathType: Prefix, backend: {service: {name: {{ include "affine.fullname" . }}, port: {number: {{ .Values.service.port }}}}}}]
 {{- end }}

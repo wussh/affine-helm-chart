@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["application", "migration", "prerequisites", "image", "secrets", "persistence", "resources", "migrationResources"],
+  "required": ["application", "migration", "prerequisites", "image", "secrets", "persistence", "resources", "migrationResources", "routing"],
   "properties": {
     "application": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
     "migration": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
@@ -25,6 +25,7 @@
       }
     },
     "persistence": {"type": "object", "required": ["storage", "config"], "properties": {"storage": {"type": "object", "required": ["existingClaim", "size", "storageClass"]}, "config": {"type": "object", "required": ["existingClaim", "size", "storageClass"]}}},
+    "routing": {"type": "object", "required": ["mode", "host", "ingress", "gateway"], "properties": {"mode": {"enum": ["none", "ingress", "gateway"]}, "host": {"type": "string", "minLength": 1}, "ingress": {"type": "object", "required": ["className", "annotations", "tlsSecretName"], "properties": {"className": {"type": "string", "minLength": 1}, "annotations": {"type": "object"}, "tlsSecretName": {"type": "string", "minLength": 1}}}, "gateway": {"type": "object", "required": ["name", "namespace", "httpSectionName", "httpsSectionName"], "properties": {"name": {"type": "string", "minLength": 1}, "namespace": {"type": "string", "minLength": 1}, "httpSectionName": {"type": "string", "minLength": 1}, "httpsSectionName": {"type": "string", "minLength": 1}}}}},
     "resources": {"type": "object"},
     "migrationResources": {"type": "object"}
   }

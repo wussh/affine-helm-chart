@@ -2,3 +2,5 @@ application:
   enabled: false
 migration:
   enabled: true
+routing:
+  mode: gateway
