@@ -1,0 +1,11 @@
+# One-time Helm-to-ArgoCD ownership adoption. No credentials.
+application:
+  enabled: true
+migration:
+  enabled: false
+prerequisites:
+  enabled: false
+secrets:
+  mode: existing
+routing:
+  mode: none
