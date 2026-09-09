@@ -1,0 +1,62 @@
+{{- if .Values.databaseProvisioning.enabled }}
+{{- $checksum := include "affine.databaseProvisioningChecksum" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "affine.fullname" . }}-database-provision-{{ $checksum }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.migrationActiveDeadlineSeconds }}
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "affine.fullname" . }}-bootstrap
+      automountServiceAccountToken: true
+      containers:
+        - name: database-provision
+          image: {{ .Values.prerequisites.database.container.image }}
+          command: [sh, -ec]
+          args:
+            - |
+              trap 'rm -f /tmp/provision.sql' EXIT
+              umask 077
+              ADMIN_SECRET={{ include "affine.databaseAdminSecretName" . }}
+              APP_SECRET={{ include "affine.databaseApplicationSecretName" . }}
+              until kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" >/dev/null 2>&1; do sleep 5; done
+              until kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" >/dev/null 2>&1; do sleep 5; done
+              PGHOST=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.hostKey }}}' | base64 -d)
+              PGPORT=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.portKey }}}' | base64 -d)
+              PGUSER=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.usernameKey }}}' | base64 -d)
+              PGPASSWORD=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.passwordKey }}}' | base64 -d)
+              APP_USER=$(kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.application.usernameKey }}}' | base64 -d)
+              APP_PASSWORD=$(kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.application.passwordKey }}}' | base64 -d)
+              export PGHOST PGPORT PGUSER PGPASSWORD
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres; do sleep 5; done
+              sql_ident() { printf '"%s"' "$(printf %s "$1" | sed 's/"/""/g')"; }
+              sql_literal() { printf "'%s'" "$(printf %s "$1" | sed "s/'/''/g")"; }
+              APP_USER_IDENT=$(sql_ident "$APP_USER")
+              APP_USER_LITERAL=$(sql_literal "$APP_USER")
+              APP_PASSWORD_LITERAL=$(sql_literal "$APP_PASSWORD")
+              APP_DATABASE_IDENT=$(sql_ident "$APP_DATABASE")
+              APP_DATABASE_LITERAL=$(sql_literal "$APP_DATABASE")
+              cat > /tmp/provision.sql <<SQL
+              SELECT format('CREATE ROLE %s LOGIN PASSWORD %s', ${APP_USER_LITERAL}, ${APP_PASSWORD_LITERAL})
+              WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${APP_USER_LITERAL}) \gexec
+              ALTER ROLE ${APP_USER_IDENT} LOGIN PASSWORD ${APP_PASSWORD_LITERAL};
+              SELECT format('CREATE DATABASE %s OWNER %s', ${APP_DATABASE_IDENT}, ${APP_USER_IDENT})
+              WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = ${APP_DATABASE_LITERAL}) \gexec
+              GRANT ALL PRIVILEGES ON DATABASE ${APP_DATABASE_IDENT} TO ${APP_USER_IDENT};
+              SQL
+              psql -v ON_ERROR_STOP=1 -d postgres -f /tmp/provision.sql
+          env:
+            - name: APP_DATABASE
+              value: {{ .Values.databaseProvisioning.database | quote }}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+{{- end }}

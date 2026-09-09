@@ -6,11 +6,6 @@ metadata:
   namespace: {{ .Values.prerequisites.database.namespace }}
   annotations: {argocd.argoproj.io/sync-wave: "-2"}
 spec:
-  allowUnsafeConfiguration: true
-  backup:
-    enabled: false
-    pitr:
-      enabled: false
   engine:
     type: postgresql
     version: {{ .Values.prerequisites.database.version | quote }}
@@ -21,7 +16,7 @@ spec:
     storage:
       class: {{ .Values.prerequisites.database.storageClass }}
       size: {{ .Values.prerequisites.database.storageSize }}
-    userSecretsName: {{ .Values.prerequisites.database.userSecretName }}
+    userSecretsName: {{ include "affine.databaseBootstrapSecretName" . }}
   proxy:
     type: pgbouncer
     replicas: 1

@@ -43,9 +43,9 @@ spec:
           image: {{ .Values.prerequisites.database.container.image }}
           env:
             - name: POSTGRES_USER
-              valueFrom: {secretKeyRef: {name: {{ .Values.prerequisites.database.userSecretName }}, key: user}}
+              valueFrom: {secretKeyRef: {name: {{ include "affine.databaseBootstrapSecretName" . }}, key: user}}
             - name: POSTGRES_PASSWORD
-              valueFrom: {secretKeyRef: {name: {{ .Values.prerequisites.database.userSecretName }}, key: password}}
+              valueFrom: {secretKeyRef: {name: {{ include "affine.databaseBootstrapSecretName" . }}, key: password}}
             - name: POSTGRES_DB
               value: {{ .Values.prerequisites.database.container.database | quote }}
           ports: [{name: postgres, containerPort: 5432}]

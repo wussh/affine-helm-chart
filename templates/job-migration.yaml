@@ -4,7 +4,10 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: affine-migration-{{ .Chart.AppVersion | replace "." "-" }}-{{ $checksum }}
-  annotations: {argocd.argoproj.io/sync-wave: "1"}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 2
   activeDeadlineSeconds: {{ .Values.migrationActiveDeadlineSeconds }}

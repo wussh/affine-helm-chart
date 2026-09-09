@@ -1,9 +1,12 @@
-{{- if and .Values.prerequisites.enabled (eq .Values.secrets.mode "create") (ne .Values.prerequisites.database.mode "external") }}
+{{- if and .Values.prerequisites.enabled (ne .Values.prerequisites.database.mode "external") }}
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "affine.fullname" . }}-bootstrap-{{ include "affine.migrationChecksum" . }}
-  annotations: {argocd.argoproj.io/sync-wave: "0"}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 2
   activeDeadlineSeconds: {{ .Values.prerequisites.bootstrap.activeDeadlineSeconds }}
@@ -25,12 +28,21 @@ spec:
               HOST={{ .Values.prerequisites.database.name }}.{{ .Values.prerequisites.database.namespace }}.svc
               PORT=5432
               {{- end }}
-              until kubectl -n {{ .Values.prerequisites.database.namespace }} get secret {{ .Values.prerequisites.database.userSecretName }} >/dev/null 2>&1; do sleep 5; done
-              USER=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret {{ .Values.prerequisites.database.userSecretName }} -o jsonpath='{.data.user}' | base64 -d)
-              PASSWORD=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret {{ .Values.prerequisites.database.userSecretName }} -o jsonpath='{.data.password}' | base64 -d)
+              until kubectl -n {{ .Values.prerequisites.database.namespace }} get secret {{ include "affine.databaseBootstrapSecretName" . }} >/dev/null 2>&1; do sleep 5; done
+              {{- if .Values.databaseProvisioning.enabled }}
+              APP_SECRET={{ include "affine.databaseApplicationSecretName" . }}
+              USER=$(kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.application.usernameKey }}}' | base64 -d)
+              PASSWORD=$(kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.application.passwordKey }}}' | base64 -d)
+              DB_NAME={{ .Values.databaseProvisioning.database | quote }}
+              {{- else }}
+              ADMIN_SECRET={{ include "affine.databaseAdminSecretName" . }}
+              USER=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.usernameKey }}}' | base64 -d)
+              PASSWORD=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.passwordKey }}}' | base64 -d)
+              DB_NAME={{ .Values.prerequisites.database.container.database | quote }}
+              {{- end }}
               {{- if eq .Values.prerequisites.database.mode "everest" }}
-              HOST=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret {{ .Values.prerequisites.database.userSecretName }} -o jsonpath='{.data.pgbouncer-host}' | base64 -d)
-              PORT=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret {{ .Values.prerequisites.database.userSecretName }} -o jsonpath='{.data.pgbouncer-port}' | base64 -d)
+              HOST=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret {{ include "affine.databaseBootstrapSecretName" . }} -o jsonpath='{.data.pgbouncer-host}' | base64 -d)
+              PORT=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret {{ include "affine.databaseBootstrapSecretName" . }} -o jsonpath='{.data.pgbouncer-port}' | base64 -d)
               {{- end }}
               until nc -z "$HOST" "$PORT"; do sleep 5; done
               {{- if .Values.prerequisites.redis.enabled }}
@@ -38,8 +50,11 @@ spec:
               {{- end }}
               ENCODED_USER=$(printf %s "$USER" | od -An -tx1 | tr -d ' \n' | sed 's/../%&/g')
               ENCODED_PASSWORD=$(printf %s "$PASSWORD" | od -An -tx1 | tr -d ' \n' | sed 's/../%&/g')
+              trap 'rm -f /tmp/DATABASE_URL' EXIT
+              umask 077
+              printf %s "postgresql://${ENCODED_USER}:${ENCODED_PASSWORD}@${HOST}:${PORT}/${DB_NAME}" > /tmp/DATABASE_URL
               kubectl -n {{ .Release.Namespace }} create secret generic {{ include "affine.databaseSecretName" . }} \
-                --from-literal=DATABASE_URL="postgresql://${ENCODED_USER}:${ENCODED_PASSWORD}@${HOST}:${PORT}/{{ .Values.prerequisites.database.container.database }}" \
+                --from-file=DATABASE_URL=/tmp/DATABASE_URL \
                 --dry-run=client -o yaml | kubectl apply -f -
           resources:
             requests: {cpu: 50m, memory: 64Mi}
