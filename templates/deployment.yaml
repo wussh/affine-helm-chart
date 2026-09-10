@@ -1,4 +1,7 @@
 {{- if .Values.application.enabled }}
+{{- $checksum := include "affine.migrationChecksum" . }}
+{{- $migrationVersion := printf "%s-%s" .Chart.AppVersion $checksum }}
+{{- $bootstrapImg := printf "%s@%s" .Values.databaseProvisioning.image.repository .Values.databaseProvisioning.image.digest }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,6 +20,33 @@ spec:
     spec:
       serviceAccountName: {{ include "affine.serviceAccountName" . }}
       automountServiceAccountToken: false
+      {{- if .Values.migration.enabled }}
+      initContainers:
+        - name: wait-migration
+          image: {{ $bootstrapImg }}
+          imagePullPolicy: {{ .Values.databaseProvisioning.image.pullPolicy }}
+          command: [/scripts/wait-migration.sh]
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ include "affine.databaseSecretName" . }}, key: DATABASE_URL}}
+            - name: EXPECTED_MIGRATION_VERSION
+              value: {{ $migrationVersion | quote }}
+            - name: WAIT_INTERVAL_SECONDS
+              value: {{ .Values.migration.waitIntervalSeconds | default 5 | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.migrationActiveDeadlineSeconds | quote }}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits:   {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 101
+            seccompProfile: {type: RuntimeDefault}
+      {{- end }}
       containers:
         - name: affine
           image: {{ include "affine.image" . }}

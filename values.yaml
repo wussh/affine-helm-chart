@@ -6,14 +6,15 @@ application:
 migration:
   enabled: true
   templateRevision: "1"
+  waitIntervalSeconds: 5
 
 databaseProvisioning:
   enabled: false
   database: affine
   image:
     repository: wushie/affine-db-bootstrap
-    tag: sha-9502f10
-    digest: sha256:11d051fe77904eee8707fb3e3b73ce63363b9e1ffa7f6d41e2ecce75ba0d3743
+    tag: sha-a093cc8
+    digest: sha256:a4d188f62069f24328a553cf62b257b3960834ce8908ee3984bfaf5f3e0e0c38
     pullPolicy: IfNotPresent
   admin:
     secretName: ""

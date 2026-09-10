@@ -1,5 +1,7 @@
 {{- if .Values.migration.enabled }}
 {{- $checksum := include "affine.migrationChecksum" . }}
+{{- $migrationVersion := printf "%s-%s" .Chart.AppVersion $checksum }}
+{{- $bootstrapImg := printf "%s@%s" .Values.databaseProvisioning.image.repository .Values.databaseProvisioning.image.digest }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -16,8 +18,8 @@ spec:
       restartPolicy: Never
       serviceAccountName: {{ include "affine.serviceAccountName" . }}
       automountServiceAccountToken: false
-      containers:
-        - name: migration
+      initContainers:
+        - name: migrate
           image: {{ include "affine.image" . }}
           command: [node, ./scripts/self-host-predeploy.js]
           env:
@@ -38,5 +40,30 @@ spec:
           resources: {{- toYaml .Values.migrationResources | nindent 12 }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
           volumeMounts: [{name: storage, mountPath: /root/.affine/storage}, {name: config, mountPath: /root/.affine/config}]
-      volumes: [{name: storage, persistentVolumeClaim: {claimName: {{ .Values.persistence.storage.existingClaim }}}}, {name: config, persistentVolumeClaim: {claimName: {{ .Values.persistence.config.existingClaim }}}}]
+      containers:
+        - name: mark-complete
+          image: {{ $bootstrapImg }}
+          imagePullPolicy: {{ .Values.databaseProvisioning.image.pullPolicy }}
+          command: [/scripts/mark-migration-complete.sh]
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ include "affine.databaseSecretName" . }}, key: DATABASE_URL}}
+            - name: MIGRATION_VERSION
+              value: {{ $migrationVersion | quote }}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits:   {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 101
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes:
+        - {name: storage, persistentVolumeClaim: {claimName: {{ .Values.persistence.storage.existingClaim }}}}
+        - {name: config,  persistentVolumeClaim: {claimName: {{ .Values.persistence.config.existingClaim }}}}
+        - {name: tmp,     emptyDir: {medium: Memory}}
 {{- end }}
