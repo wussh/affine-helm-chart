@@ -29,14 +29,18 @@ spec:
               mkdir -p /run/affine-secrets
               ADMIN_SECRET={{ include "affine.databaseAdminSecretName" . }}
               APP_SECRET={{ include "affine.databaseApplicationSecretName" . }}
-              until kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" >/dev/null 2>&1; do sleep 5; done
-              until kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" >/dev/null 2>&1; do sleep 5; done
+              until test -n "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.hostKey }}']}" 2>/dev/null)"; do sleep 5; done
+              until test -n "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.portKey }}']}" 2>/dev/null)"; do sleep 5; done
+              until test -n "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.usernameKey }}']}" 2>/dev/null)"; do sleep 5; done
+              until test -n "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.passwordKey }}']}" 2>/dev/null)"; do sleep 5; done
+              until test -n "$(kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.application.usernameKey }}']}" 2>/dev/null)"; do sleep 5; done
+              until test -n "$(kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.application.passwordKey }}']}" 2>/dev/null)"; do sleep 5; done
               kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.hostKey }}']}" | base64 -d > /run/affine-secrets/pg-host
               kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.portKey }}']}" | base64 -d > /run/affine-secrets/pg-port
               kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.usernameKey }}']}" | base64 -d > /run/affine-secrets/pg-user
               kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.passwordKey }}']}" | base64 -d > /run/affine-secrets/pg-password
-              kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath='{.data["{{ .Values.databaseProvisioning.application.usernameKey }}"]}' | base64 -d > /run/affine-secrets/app-user
-              kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath='{.data["{{ .Values.databaseProvisioning.application.passwordKey }}"]}' | base64 -d > /run/affine-secrets/app-password
+              kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.application.usernameKey }}']}" | base64 -d > /run/affine-secrets/app-user
+              kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.application.passwordKey }}']}" | base64 -d > /run/affine-secrets/app-password
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
           volumeMounts:
             - {name: secret-data, mountPath: /run/affine-secrets}
