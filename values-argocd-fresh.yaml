@@ -7,8 +7,8 @@ databaseProvisioning:
   database: affine
   admin:
     secretName: db-affine-bootstrap
-    hostKey: host
-    portKey: port
+    hostKey: pgbouncer-host
+    portKey: pgbouncer-port
     usernameKey: user
     passwordKey: password
   application:

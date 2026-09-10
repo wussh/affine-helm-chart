@@ -42,8 +42,8 @@ spec:
               {{- end }}
               {{- if eq .Values.prerequisites.database.mode "everest" }}
               ADMIN_SECRET={{ include "affine.databaseAdminSecretName" . }}
-              HOST=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.hostKey }}}' | base64 -d)
-              PORT=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.portKey }}}' | base64 -d)
+              HOST=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.hostKey }}']}" | base64 -d)
+              PORT=$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.portKey }}']}" | base64 -d)
               {{- end }}
               until nc -z "$HOST" "$PORT"; do sleep 5; done
               {{- if .Values.prerequisites.redis.enabled }}
