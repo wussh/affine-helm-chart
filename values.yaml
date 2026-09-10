@@ -11,8 +11,8 @@ databaseProvisioning:
   database: affine
   admin:
     secretName: ""
-    hostKey: pgbouncer-host
-    portKey: pgbouncer-port
+    hostKey: host
+    portKey: port
     usernameKey: user
     passwordKey: password
   application:

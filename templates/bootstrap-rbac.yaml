@@ -1,4 +1,4 @@
-{{- if and .Values.prerequisites.enabled (ne .Values.prerequisites.database.mode "external") }}
+{{- if or .Values.prerequisites.enabled .Values.databaseProvisioning.enabled }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
