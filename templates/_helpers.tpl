@@ -10,6 +10,7 @@
 {{- define "affine.databaseProvisioningChecksum" -}}
 {{- toJson (dict "image" .Values.prerequisites.database.container.image "provisioning" .Values.databaseProvisioning "adminSecret" (include "affine.databaseAdminSecretName" .) "applicationSecret" (include "affine.databaseApplicationSecretName" .)) | sha256sum | trunc 8 -}}
 {{- end }}
+{{- define "affine.databaseProvisioningJobName" -}}{{ include "affine.fullname" . }}-database-provision-{{ include "affine.databaseProvisioningChecksum" . }}{{- end }}
 {{- define "affine.validateInlineSecrets" -}}
 {{- if .Values.prerequisites.database.secret.create }}
 {{- $_ := required "prerequisites.database.secret.username is required when creating database bootstrap Secret" .Values.prerequisites.database.secret.username -}}
