@@ -62,14 +62,24 @@ cat > "$TMP/bin/pg_isready" <<'EOF'
 #!/usr/bin/env sh
 exit "${MOCK_PG_READY_EXIT:-0}"
 EOF
-chmod +x "$TMP/bin/pg_isready"
-if MOCK_PG_READY_EXIT=1 PATH="$TMP/bin:$PATH" SECRET_DIR="$TMP/secrets" \
+cat > "$TMP/bin/psql" <<'EOF'
+#!/usr/bin/env sh
+exit "${MOCK_PSQL_EXIT:-0}"
+EOF
+chmod +x "$TMP/bin/pg_isready" "$TMP/bin/psql"
+if MOCK_PG_READY_EXIT=1 MOCK_PSQL_EXIT=0 PATH="$TMP/bin:$PATH" SECRET_DIR="$TMP/secrets" \
   WAIT_INTERVAL_SECONDS=1 WAIT_TIMEOUT_SECONDS=1 \
   "$ROOT/scripts/wait-postgres.sh" >/dev/null 2>"$TMP/pg-unavailable.log"; then
   fail 'PostgreSQL unavailable accepted'
 fi
 ok 'PostgreSQL unavailable times out'
-MOCK_PG_READY_EXIT=0 PATH="$TMP/bin:$PATH" SECRET_DIR="$TMP/secrets" \
+if MOCK_PG_READY_EXIT=0 MOCK_PSQL_EXIT=1 PATH="$TMP/bin:$PATH" SECRET_DIR="$TMP/secrets" \
+  WAIT_INTERVAL_SECONDS=1 WAIT_TIMEOUT_SECONDS=1 \
+  "$ROOT/scripts/wait-postgres.sh" >/dev/null 2>"$TMP/pg-login-unavailable.log"; then
+  fail 'PgBouncer proxy accepted without backend login'
+fi
+ok 'PgBouncer false-positive readiness times out'
+MOCK_PG_READY_EXIT=0 MOCK_PSQL_EXIT=0 PATH="$TMP/bin:$PATH" SECRET_DIR="$TMP/secrets" \
   WAIT_INTERVAL_SECONDS=1 WAIT_TIMEOUT_SECONDS=1 \
   "$ROOT/scripts/wait-postgres.sh" >/dev/null 2>"$TMP/pg-ready.log" || fail 'PostgreSQL ready rejected'
 ok 'PostgreSQL ready succeeds'

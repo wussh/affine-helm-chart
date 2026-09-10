@@ -35,8 +35,11 @@ info "Waiting for PostgreSQL readiness ..."
 
 _elapsed=0
 while true; do
-  # pg_isready exits 0 when server accepts connections
-  if pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -q; then
+  # PgBouncer can accept connections before backend login works. Require both
+  # proxy readiness and an authenticated query to avoid false positives.
+  if pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -q \
+    && psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres \
+      -Atqc 'SELECT 1' >/dev/null 2>&1; then
     info "PostgreSQL ready."
     exit 0
   fi
