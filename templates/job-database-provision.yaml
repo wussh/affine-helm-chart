@@ -1,11 +1,22 @@
 {{- if .Values.databaseProvisioning.enabled }}
-{{- $checksum := include "affine.databaseProvisioningChecksum" . }}
+{{- $img := .Values.databaseProvisioning.image }}
+{{- $bootstrapImage := printf "%s:%s" $img.repository $img.tag }}
+{{- if $img.digest }}
+{{- $bootstrapImage = printf "%s@%s" $img.repository $img.digest }}
+{{- end }}
+{{- $jobSecurityContext := deepCopy .Values.securityContext }}
+{{- $_ := set $jobSecurityContext "readOnlyRootFilesystem" true }}
+{{- $_ := set $jobSecurityContext "runAsNonRoot" true }}
+{{- $_ := set $jobSecurityContext "runAsUser" 10001 }}
+{{- $_ := set $jobSecurityContext "runAsGroup" 101 }}
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "affine.databaseProvisioningJobName" . }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 {{ if .Values.helmHooks }}
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "0"
@@ -19,71 +30,76 @@ spec:
       restartPolicy: Never
       serviceAccountName: {{ include "affine.fullname" . }}-bootstrap
       automountServiceAccountToken: true
+      securityContext:
+        fsGroup: 101
       initContainers:
-        - name: load-secrets
-          image: {{ .Values.prerequisites.bootstrap.image }}
-          command: [sh, -ec]
-          args:
-            - |
-              umask 077
-              mkdir -p /run/affine-secrets
-              ADMIN_SECRET={{ include "affine.databaseAdminSecretName" . }}
-              APP_SECRET={{ include "affine.databaseApplicationSecretName" . }}
-              until test -n "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.hostKey }}']}" 2>/dev/null)"; do sleep 5; done
-              until test -n "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.portKey }}']}" 2>/dev/null)"; do sleep 5; done
-              until test -n "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.usernameKey }}']}" 2>/dev/null)"; do sleep 5; done
-              until test -n "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.passwordKey }}']}" 2>/dev/null)"; do sleep 5; done
-              until test -n "$(kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.application.usernameKey }}']}" 2>/dev/null)"; do sleep 5; done
-              until test -n "$(kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.application.passwordKey }}']}" 2>/dev/null)"; do sleep 5; done
-              kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.hostKey }}']}" | base64 -d > /run/affine-secrets/pg-host
-              kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.portKey }}']}" | base64 -d > /run/affine-secrets/pg-port
-              kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.usernameKey }}']}" | base64 -d > /run/affine-secrets/pg-user
-              kubectl -n {{ .Values.prerequisites.database.namespace }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.passwordKey }}']}" | base64 -d > /run/affine-secrets/pg-password
-              kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.application.usernameKey }}']}" | base64 -d > /run/affine-secrets/app-user
-              kubectl -n {{ .Values.secrets.database.namespace }} get secret "$APP_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.application.passwordKey }}']}" | base64 -d > /run/affine-secrets/app-password
-          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+        - name: wait-and-load-secrets
+          image: {{ $bootstrapImage }}
+          imagePullPolicy: {{ $img.pullPolicy }}
+          command: ["/scripts/wait-and-load-secrets.sh"]
+          env:
+            - name: ADMIN_SECRET_NAMESPACE
+              value: {{ .Values.prerequisites.database.namespace | quote }}
+            - name: ADMIN_SECRET_NAME
+              value: {{ include "affine.databaseAdminSecretName" . | quote }}
+            - name: ADMIN_HOST_KEY
+              value: {{ .Values.databaseProvisioning.admin.hostKey | quote }}
+            - name: ADMIN_PORT_KEY
+              value: {{ .Values.databaseProvisioning.admin.portKey | quote }}
+            - name: ADMIN_USERNAME_KEY
+              value: {{ .Values.databaseProvisioning.admin.usernameKey | quote }}
+            - name: ADMIN_PASSWORD_KEY
+              value: {{ .Values.databaseProvisioning.admin.passwordKey | quote }}
+            - name: APP_SECRET_NAMESPACE
+              value: {{ .Values.secrets.database.namespace | quote }}
+            - name: APP_SECRET_NAME
+              value: {{ include "affine.databaseApplicationSecretName" . | quote }}
+            - name: APP_USERNAME_KEY
+              value: {{ .Values.databaseProvisioning.application.usernameKey | quote }}
+            - name: APP_PASSWORD_KEY
+              value: {{ .Values.databaseProvisioning.application.passwordKey | quote }}
+            - name: WAIT_INTERVAL_SECONDS
+              value: {{ .Values.databaseProvisioning.waitIntervalSeconds | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.databaseProvisioning.waitTimeoutSeconds | quote }}
+          securityContext: {{- toYaml $jobSecurityContext | nindent 12 }}
           volumeMounts:
-            - {name: secret-data, mountPath: /run/affine-secrets}
+            - name: secret-data
+              mountPath: /run/affine-secrets
+            - name: tmp
+              mountPath: /tmp
       containers:
-        - name: database-provision
-          image: {{ .Values.prerequisites.database.container.image }}
-          command: [sh, -ec]
-          args:
+        - name: provision-db
+          image: {{ $bootstrapImage }}
+          imagePullPolicy: {{ $img.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
             - |
-              umask 077
-              trap 'rm -f /tmp/provision.sql' EXIT
-              PGHOST=$(cat /run/affine-secrets/pg-host)
-              PGPORT=$(cat /run/affine-secrets/pg-port)
-              PGUSER=$(cat /run/affine-secrets/pg-user)
-              PGPASSWORD=$(cat /run/affine-secrets/pg-password)
-              APP_USER=$(cat /run/affine-secrets/app-user)
-              APP_PASSWORD=$(cat /run/affine-secrets/app-password)
-              export PGHOST PGPORT PGUSER PGPASSWORD PGSSLMODE=require
-              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres; do sleep 5; done
-              export APP_USER APP_PASSWORD APP_DATABASE
-              cat > /tmp/provision.sql <<'SQL'
-              \getenv app_user APP_USER
-              \getenv app_password APP_PASSWORD
-              \getenv app_database APP_DATABASE
-              SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'app_user', :'app_password')
-              WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user') \gexec
-              ALTER ROLE :"app_user" LOGIN PASSWORD :'app_password';
-              SELECT format('CREATE DATABASE %I OWNER %I', :'app_database', :'app_user')
-              WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'app_database') \gexec
-              GRANT ALL PRIVILEGES ON DATABASE :"app_database" TO :"app_user";
-              SQL
-              psql -v ON_ERROR_STOP=1 -d postgres -f /tmp/provision.sql
+              /scripts/wait-postgres.sh
+              /scripts/provision-db.sh
           env:
             - name: APP_DATABASE
               value: {{ .Values.databaseProvisioning.database | quote }}
+            - name: WAIT_INTERVAL_SECONDS
+              value: {{ .Values.databaseProvisioning.waitIntervalSeconds | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.databaseProvisioning.waitTimeoutSeconds | quote }}
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {cpu: 250m, memory: 256Mi}
-          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          securityContext: {{- toYaml $jobSecurityContext | nindent 12 }}
           volumeMounts:
-            - {name: secret-data, mountPath: /run/affine-secrets, readOnly: true}
+            - name: secret-data
+              mountPath: /run/affine-secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: secret-data
+          emptyDir:
+            medium: Memory
+        - name: tmp
           emptyDir:
             medium: Memory
 {{- end }}

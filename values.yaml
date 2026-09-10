@@ -10,6 +10,11 @@ migration:
 databaseProvisioning:
   enabled: false
   database: affine
+  image:
+    repository: wushie/affine-db-bootstrap
+    tag: sha-9502f10
+    digest: sha256:11d051fe77904eee8707fb3e3b73ce63363b9e1ffa7f6d41e2ecce75ba0d3743
+    pullPolicy: IfNotPresent
   admin:
     secretName: ""
     hostKey: pgbouncer-host
@@ -19,6 +24,8 @@ databaseProvisioning:
   application:
     usernameKey: POSTGRES_USERNAME
     passwordKey: POSTGRES_PASSWORD
+  waitIntervalSeconds: 5
+  waitTimeoutSeconds: 300
 
 prerequisites:
   enabled: false

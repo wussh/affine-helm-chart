@@ -20,6 +20,9 @@ spec:
           command: [sh, -ec]
           args:
             - |
+              {{- if .Values.databaseProvisioning.enabled }}
+              kubectl -n {{ .Release.Namespace }} wait --for=condition=complete --timeout={{ .Values.migrationActiveDeadlineSeconds }}s job/{{ include "affine.databaseProvisioningJobName" . }}
+              {{- end }}
               {{- if eq .Values.prerequisites.database.mode "everest" }}
               until [ "$(kubectl -n {{ .Values.prerequisites.database.namespace }} get databasecluster {{ .Values.prerequisites.database.name }} -o jsonpath='{.status.status}')" = ready ]; do sleep 5; done
               HOST_KEY=pgbouncer-host
