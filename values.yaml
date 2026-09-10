@@ -1,10 +1,31 @@
 replicaCount: 1
+helmHooks: false
 
 application:
   enabled: false
 migration:
   enabled: true
   templateRevision: "1"
+
+databaseProvisioning:
+  enabled: false
+  database: affine
+  image:
+    repository: wushie/affine-db-bootstrap
+    tag: sha-9502f10
+    digest: sha256:11d051fe77904eee8707fb3e3b73ce63363b9e1ffa7f6d41e2ecce75ba0d3743
+    pullPolicy: IfNotPresent
+  admin:
+    secretName: ""
+    hostKey: pgbouncer-host
+    portKey: pgbouncer-port
+    usernameKey: user
+    passwordKey: password
+  application:
+    usernameKey: POSTGRES_USERNAME
+    passwordKey: POSTGRES_PASSWORD
+  waitIntervalSeconds: 5
+  waitTimeoutSeconds: 300
 
 prerequisites:
   enabled: false
@@ -13,6 +34,12 @@ prerequisites:
     name: db-affine
     namespace: prod
     userSecretName: everest-secrets-db-affine
+    secret:
+      # Inline credentials suit local/dev use; production should use external Secrets, Sealed Secrets, or an approved secret manager.
+      create: false
+      name: everest-secrets-db-affine
+      username: ""
+      password: ""
     version: "16.4"
     storageClass: storage-nvme-c1
     storageSize: 25Gi
@@ -40,12 +67,23 @@ secrets:
   mode: existing
   database:
     name: affine-database
+    namespace: affine
+    secret:
+      # Inline credentials suit local/dev use; production should use external Secrets, Sealed Secrets, or an approved secret manager.
+      create: false
+      username: ""
+      password: ""
     data:
       DATABASE_URL: ""
       POSTGRES_USERNAME: ""
       POSTGRES_PASSWORD: ""
   redis:
     name: affine-redis
+    namespace: affine
+    secret:
+      # Inline credentials suit local/dev use; production should use external Secrets, Sealed Secrets, or an approved secret manager.
+      create: false
+      password: ""
     data:
       REDIS_SERVER_HOST: affine-redis
       REDIS_SERVER_PORT: "6379"
