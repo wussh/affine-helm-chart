@@ -1,4 +1,5 @@
 replicaCount: 1
+helmHooks: false
 
 application:
   enabled: false

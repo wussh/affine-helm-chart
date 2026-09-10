@@ -6,8 +6,11 @@ metadata:
   name: {{ include "affine.databaseProvisioningJobName" . }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+{{ if .Values.helmHooks }}
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+{{ end }}
 spec:
   backoffLimit: 2
   activeDeadlineSeconds: {{ .Values.migrationActiveDeadlineSeconds }}
