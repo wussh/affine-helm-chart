@@ -1,15 +1,37 @@
-{{- range $claim := list .Values.persistence.storage .Values.persistence.config }}
+{{- if or .Values.application.enabled .Values.migration.enabled }}
+{{- if .Values.persistence.storage.create }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ required "persistence.existingClaim is required" $claim.existingClaim }}
+  name: {{ include "affine.storageClaimName" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
+    {{- if .Values.persistence.storage.retain }}
     helm.sh/resource-policy: keep
+    {{- end }}
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: {{ $claim.storageClass }}
+  storageClassName: {{ .Values.persistence.storage.storageClass }}
   resources:
-    requests: {storage: {{ $claim.size }}}
+    requests: {storage: {{ .Values.persistence.storage.size }}}
+{{- end }}
+{{- if .Values.persistence.config.create }}
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "affine.configClaimName" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    {{- if .Values.persistence.config.retain }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.persistence.config.storageClass }}
+  resources:
+    requests: {storage: {{ .Values.persistence.config.size }}}
+{{- end }}
 {{- end }}

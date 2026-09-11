@@ -3,6 +3,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "affine.fullname" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
     {{- toYaml .Values.routing.ingress.annotations | nindent 4 }}

@@ -5,20 +5,52 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: affine-migration-{{ .Chart.AppVersion | replace "." "-" }}-{{ $checksum }}
+  name: {{ include "affine.migrationJobName" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "2"
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 2
   activeDeadlineSeconds: {{ .Values.migrationActiveDeadlineSeconds }}
+  {{- if gt (int .Values.jobRetentionSeconds) 0 }}
+  ttlSecondsAfterFinished: {{ .Values.jobRetentionSeconds }}
+  {{- end }}
   template:
+    metadata:
+      labels: {{- include "affine.labels" . | nindent 8 }}
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "affine.serviceAccountName" . }}
       automountServiceAccountToken: false
       initContainers:
+        # Migration must not start, or report CreateContainerConfigError, while
+        # the bootstrap Job is still preparing DATABASE_URL.
+        - name: wait-for-secrets
+          image: {{ $bootstrapImg }}
+          imagePullPolicy: {{ .Values.databaseProvisioning.image.pullPolicy }}
+          command: [/bin/sh, -ec]
+          args:
+            - |
+{{ include "affine.waitForDependenciesScript" . | indent 14 }}
+          env:
+            - name: WAIT_INTERVAL_SECONDS
+              value: {{ .Values.secrets.database.waitIntervalSeconds | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.secrets.database.waitTimeoutSeconds | quote }}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits:   {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 101
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: database-secret-wait, mountPath: /run/affine-secret-wait/database, readOnly: true}
+            - {name: redis-secret-wait, mountPath: /run/affine-secret-wait/redis, readOnly: true}
         - name: migrate
           image: {{ include "affine.image" . }}
           command: [node, ./scripts/self-host-predeploy.js]
@@ -39,7 +71,14 @@ spec:
               valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_DATABASE}}
           resources: {{- toYaml .Values.migrationResources | nindent 12 }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
-          volumeMounts: [{name: storage, mountPath: /root/.affine/storage}, {name: config, mountPath: /root/.affine/config}]
+          # config/storage are node-local emptyDirs, not the ReadWriteOnce PVCs the
+          # Deployment holds: predeploy touches only the database, and mounting the
+          # shared claims deadlocks the release (migration waits for a volume the
+          # app pod already holds while the app waits for migration to finish).
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: storage, mountPath: /root/.affine/storage}
+            - {name: config, mountPath: /root/.affine/config}
       containers:
         - name: mark-complete
           image: {{ $bootstrapImg }}
@@ -63,7 +102,25 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           volumeMounts: [{name: tmp, mountPath: /tmp}]
       volumes:
-        - {name: storage, persistentVolumeClaim: {claimName: {{ .Values.persistence.storage.existingClaim }}}}
-        - {name: config,  persistentVolumeClaim: {claimName: {{ .Values.persistence.config.existingClaim }}}}
+        # emptyDir, not the PVCs: the migrate initContainer must be schedulable on
+        # any node without contending for the Deployment's ReadWriteOnce claims.
+        - {name: storage, emptyDir: {}}
+        - {name: config,  emptyDir: {}}
         - {name: tmp,     emptyDir: {medium: Memory}}
+        - name: database-secret-wait
+          secret:
+            secretName: {{ include "affine.databaseSecretName" . }}
+            optional: true
+            items:
+              - {key: DATABASE_URL, path: DATABASE_URL}
+        - name: redis-secret-wait
+          secret:
+            secretName: {{ include "affine.redisSecretName" . }}
+            optional: true
+            items:
+              - {key: REDIS_SERVER_HOST, path: REDIS_SERVER_HOST}
+              - {key: REDIS_SERVER_PORT, path: REDIS_SERVER_PORT}
+              - {key: REDIS_SERVER_USERNAME, path: REDIS_SERVER_USERNAME}
+              - {key: REDIS_SERVER_PASSWORD, path: REDIS_SERVER_PASSWORD}
+              - {key: REDIS_SERVER_DATABASE, path: REDIS_SERVER_DATABASE}
 {{- end }}

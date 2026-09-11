@@ -1,15 +1,18 @@
-{{- if or .Values.prerequisites.enabled .Values.databaseProvisioning.enabled }}
+{{- $bootstrapActive := eq (include "affine.bootstrapActive" .) "true" }}
+{{- if or $bootstrapActive .Values.databaseProvisioning.enabled }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ include "affine.fullname" . }}-bootstrap
+  labels: {{- include "affine.labels" . | nindent 4 }}
   annotations: {argocd.argoproj.io/sync-wave: "-1"}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "affine.fullname" . }}-bootstrap-source
-  namespace: {{ .Values.prerequisites.database.namespace }}
+  namespace: {{ include "affine.prerequisiteDatabaseNamespace" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: [secrets]
@@ -26,7 +29,8 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "affine.fullname" . }}-bootstrap-source
-  namespace: {{ .Values.prerequisites.database.namespace }}
+  namespace: {{ include "affine.prerequisiteDatabaseNamespace" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "affine.fullname" . }}-bootstrap
@@ -40,11 +44,15 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "affine.fullname" . }}-bootstrap-target
+  labels: {{- include "affine.labels" . | nindent 4 }}
 rules:
+  # get only. The database-provision Job reads the application Secret to learn
+  # the role it must create; it never writes it. Write access lives in the
+  # separate -bootstrap-writer Role, rendered only when bootstrapActive.
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [{{ include "affine.databaseSecretName" . }}]
-    verbs: [get, patch, update]
+    verbs: [get]
   {{- if .Values.databaseProvisioning.enabled }}
   - apiGroups: [batch]
     resources: [jobs]
@@ -56,6 +64,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "affine.fullname" . }}-bootstrap-target
+  labels: {{- include "affine.labels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "affine.fullname" . }}-bootstrap
@@ -63,4 +72,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ include "affine.fullname" . }}-bootstrap-target
+{{- if $bootstrapActive }}
+---
+# Write access to the application Secret. Rendered ONLY when the chart-managed
+# bootstrap Job is active (secrets.mode=create, or secrets.mode=existing with
+# secrets.database.allowBootstrapPatch=true). With the default existing mode
+# this Role does not exist, so no chart-created workload can reach the external
+# Secret with a write verb.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "affine.fullname" . }}-bootstrap-writer
+  labels: {{- include "affine.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ include "affine.databaseSecretName" . }}]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "affine.fullname" . }}-bootstrap-writer
+  labels: {{- include "affine.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "affine.fullname" . }}-bootstrap
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "affine.fullname" . }}-bootstrap-writer
+{{- end }}
 {{- end }}

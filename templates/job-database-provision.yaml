@@ -13,19 +13,18 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "affine.databaseProvisioningJobName" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-{{ if .Values.helmHooks }}
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "0"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-{{ end }}
 spec:
   backoffLimit: 2
   activeDeadlineSeconds: {{ .Values.migrationActiveDeadlineSeconds }}
+  {{- if gt (int .Values.jobRetentionSeconds) 0 }}
+  ttlSecondsAfterFinished: {{ .Values.jobRetentionSeconds }}
+  {{- end }}
   template:
+    metadata:
+      labels: {{- include "affine.labels" . | nindent 8 }}
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "affine.fullname" . }}-bootstrap
@@ -39,7 +38,7 @@ spec:
           command: ["/scripts/wait-and-load-secrets.sh"]
           env:
             - name: ADMIN_SECRET_NAMESPACE
-              value: {{ .Values.prerequisites.database.namespace | quote }}
+              value: {{ include "affine.prerequisiteDatabaseNamespace" . | quote }}
             - name: ADMIN_SECRET_NAME
               value: {{ include "affine.databaseAdminSecretName" . | quote }}
             - name: ADMIN_HOST_KEY
@@ -51,7 +50,7 @@ spec:
             - name: ADMIN_PASSWORD_KEY
               value: {{ .Values.databaseProvisioning.admin.passwordKey | quote }}
             - name: APP_SECRET_NAMESPACE
-              value: {{ .Values.secrets.database.namespace | quote }}
+              value: {{ include "affine.databaseSecretNamespace" . | quote }}
             - name: APP_SECRET_NAME
               value: {{ include "affine.databaseApplicationSecretName" . | quote }}
             - name: APP_USERNAME_KEY

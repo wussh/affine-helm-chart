@@ -1,34 +1,455 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["application", "migration", "prerequisites", "image", "secrets", "persistence", "resources", "migrationResources", "routing"],
+  "additionalProperties": false,
+  "required": [
+    "replicaCount",
+    "application",
+    "migration",
+    "databaseProvisioning",
+    "prerequisites",
+    "image",
+    "secrets",
+    "resources",
+    "migrationResources",
+    "migrationActiveDeadlineSeconds",
+    "jobRetentionSeconds",
+    "serviceAccount",
+    "securityContext",
+    "persistence",
+    "probes",
+    "service",
+    "routing",
+    "config"
+  ],
   "properties": {
-    "application": {"type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
-    "migration": {"type": "object", "required": ["enabled", "templateRevision"], "properties": {"enabled": {"type": "boolean"}, "templateRevision": {"type": "string", "minLength": 1}}},
-    "databaseProvisioning": {"type": "object", "required": ["enabled", "database", "image", "admin", "application"], "properties": {"enabled": {"type": "boolean"}, "database": {"type": "string", "minLength": 1}, "image": {"type": "object", "required": ["repository", "tag", "digest", "pullPolicy"], "properties": {"repository": {"type": "string", "minLength": 1}, "tag": {"type": "string", "minLength": 1}, "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}, "pullPolicy": {"type": "string"}}}, "admin": {"type": "object", "required": ["secretName", "hostKey", "portKey", "usernameKey", "passwordKey"], "properties": {"secretName": {"type": "string"}, "hostKey": {"type": "string", "minLength": 1}, "portKey": {"type": "string", "minLength": 1}, "usernameKey": {"type": "string", "minLength": 1}, "passwordKey": {"type": "string", "minLength": 1}}}, "application": {"type": "object", "required": ["usernameKey", "passwordKey"], "properties": {"usernameKey": {"type": "string", "minLength": 1}, "passwordKey": {"type": "string", "minLength": 1}}}, "waitIntervalSeconds": {"type": "integer", "minimum": 1}, "waitTimeoutSeconds": {"type": "integer", "minimum": 60}}},
-    "prerequisites": {"type": "object", "required": ["enabled", "database", "redis", "bootstrap"], "properties": {"enabled": {"type": "boolean"}, "database": {"type": "object", "required": ["mode", "name", "namespace", "userSecretName", "secret", "version", "storageClass", "storageSize", "replicas", "container"], "properties": {"mode": {"enum": ["everest", "container", "external"]}, "name": {"type": "string", "minLength": 1}, "namespace": {"type": "string", "minLength": 1}, "userSecretName": {"type": "string", "minLength": 1}, "secret": {"type": "object", "required": ["create", "name", "username", "password"], "properties": {"create": {"type": "boolean"}, "name": {"type": "string", "minLength": 1}, "username": {"type": "string"}, "password": {"type": "string"}}}, "version": {"type": "string", "pattern": "^16\\.[0-9]+$"}, "storageClass": {"type": "string", "minLength": 1}, "storageSize": {"type": "string", "minLength": 1}, "replicas": {"type": "integer", "minimum": 1, "maximum": 1}, "container": {"type": "object", "required": ["image", "database"], "properties": {"image": {"type": "string", "pattern": "^docker.io/library/postgres@sha256:[a-f0-9]{64}$"}, "database": {"type": "string", "minLength": 1}}}}}, "redis": {"type": "object", "required": ["enabled", "name", "image", "storageClass", "storageSize"], "properties": {"enabled": {"type": "boolean"}, "name": {"type": "string", "minLength": 1}, "image": {"type": "string", "pattern": "^docker.io/library/redis@sha256:[a-f0-9]{64}$"}, "storageClass": {"type": "string", "minLength": 1}, "storageSize": {"type": "string", "minLength": 1}}}, "bootstrap": {"type": "object", "required": ["image", "activeDeadlineSeconds"], "properties": {"image": {"type": "string", "pattern": "^docker.io/alpine/k8s@sha256:[a-f0-9]{64}$"}, "activeDeadlineSeconds": {"type": "integer", "minimum": 60}}}}},
     "replicaCount": {"type": "integer", "minimum": 1, "maximum": 1},
-    "helmHooks": {"type": "boolean"},
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {"enabled": {"type": "boolean"}}
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "templateRevision", "waitIntervalSeconds"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "templateRevision": {"type": "string", "minLength": 1},
+        "waitIntervalSeconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "databaseProvisioning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "database", "image", "admin", "application", "waitIntervalSeconds", "waitTimeoutSeconds"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "database": {"type": "string", "minLength": 1},
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "tag", "digest", "pullPolicy"],
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "tag": {"type": "string", "minLength": 1},
+            "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+            "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+          }
+        },
+        "admin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretName", "hostKey", "portKey", "usernameKey", "passwordKey"],
+          "properties": {
+            "secretName": {"type": "string"},
+            "hostKey": {"type": "string", "minLength": 1},
+            "portKey": {"type": "string", "minLength": 1},
+            "usernameKey": {"type": "string", "minLength": 1},
+            "passwordKey": {"type": "string", "minLength": 1}
+          }
+        },
+        "application": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["usernameKey", "passwordKey"],
+          "properties": {
+            "usernameKey": {"type": "string", "minLength": 1},
+            "passwordKey": {"type": "string", "minLength": 1}
+          }
+        },
+        "waitIntervalSeconds": {"type": "integer", "minimum": 1},
+        "waitTimeoutSeconds": {"type": "integer", "minimum": 60}
+      }
+    },
+    "prerequisites": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "database", "bootstrap", "redis"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "name", "namespace", "existing", "userSecretName", "secret", "version", "storageClass", "storageSize", "replicas", "persistencePolicy", "container", "persistence"],
+          "properties": {
+            "mode": {"enum": ["everest", "container", "external"]},
+            "name": {"type": "string", "minLength": 1},
+            "namespace": {"type": "string"},
+            "existing": {"type": "boolean"},
+            "userSecretName": {"type": "string", "minLength": 1},
+            "secret": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "username", "password"],
+              "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "username": {"type": "string"},
+                "password": {"type": "string"}
+              }
+            },
+            "version": {"type": "string", "pattern": "^16\\.[0-9]+$"},
+            "storageClass": {"type": "string", "minLength": 1},
+            "storageSize": {"type": "string", "minLength": 1},
+            "replicas": {"type": "integer", "minimum": 1, "maximum": 1},
+            "persistencePolicy": {"enum": ["keep", "delete"]},
+            "container": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["image", "database"],
+              "properties": {
+                "image": {"type": "string", "pattern": "^docker\\.io/library/postgres@sha256:[a-f0-9]{64}$"},
+                "database": {"type": "string", "minLength": 1}
+              }
+            },
+            "persistence": {"$ref": "#/definitions/prerequisiteClaim"}
+          }
+        },
+        "bootstrap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image", "activeDeadlineSeconds"],
+          "properties": {
+            "image": {"type": "string", "pattern": "^docker\\.io/alpine/k8s@sha256:[a-f0-9]{64}$"},
+            "activeDeadlineSeconds": {"type": "integer", "minimum": 60}
+          }
+        },
+        "redis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "name", "image", "storageClass", "storageSize", "persistence"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "name": {"type": "string", "minLength": 1},
+            "image": {"type": "string", "pattern": "^docker\\.io/library/redis@sha256:[a-f0-9]{64}$"},
+            "storageClass": {"type": "string", "minLength": 1},
+            "storageSize": {"type": "string", "minLength": 1},
+            "persistence": {"$ref": "#/definitions/prerequisiteClaim"}
+          }
+        }
+      }
+    },
     "image": {
-      "type": "object", "required": ["repository", "tag", "digest", "pullPolicy"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
       "properties": {
         "repository": {"type": "string", "minLength": 1},
         "tag": {"type": "string", "pattern": "^0\\.27\\.4$"},
         "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
-        "pullPolicy": {"type": "string"}
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
       }
     },
     "secrets": {
-      "type": "object", "required": ["mode", "database", "redis"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "database", "redis"],
       "properties": {
-        "mode": {"enum": ["existing", "create"]},
-        "database": {"type": "object", "required": ["name", "data"], "properties": {"name": {"type": "string", "minLength": 1}, "namespace": {"type": "string", "minLength": 1}, "secret": {"type": "object", "required": ["create", "password"], "properties": {"create": {"type": "boolean"}, "password": {"type": "string"}}}, "data": {"type": "object", "required": ["DATABASE_URL"], "properties": {"DATABASE_URL": {"type": "string"}, "POSTGRES_USERNAME": {"type": "string"}, "POSTGRES_PASSWORD": {"type": "string"}}}}},
-        "redis": {"type": "object", "required": ["name", "data"], "properties": {"name": {"type": "string", "minLength": 1}, "namespace": {"type": "string", "minLength": 1}, "secret": {"type": "object", "required": ["create", "password"], "properties": {"create": {"type": "boolean"}, "password": {"type": "string"}}}, "data": {"type": "object", "required": ["REDIS_SERVER_HOST", "REDIS_SERVER_PORT", "REDIS_SERVER_USERNAME", "REDIS_SERVER_PASSWORD", "REDIS_SERVER_DATABASE"], "properties": {"REDIS_SERVER_HOST": {"type": "string", "minLength": 1}, "REDIS_SERVER_PORT": {"type": "string", "minLength": 1}, "REDIS_SERVER_USERNAME": {"type": "string", "minLength": 1}, "REDIS_SERVER_PASSWORD": {"type": "string"}, "REDIS_SERVER_DATABASE": {"type": "string", "minLength": 1}}}}}
+        "mode": {"enum": ["create", "existing"]},
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "namespace", "allowBootstrapPatch", "waitIntervalSeconds", "waitTimeoutSeconds", "data"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "namespace": {"type": "string"},
+            "allowBootstrapPatch": {"type": "boolean"},
+            "waitIntervalSeconds": {"type": "integer", "minimum": 1},
+            "waitTimeoutSeconds": {"type": "integer", "minimum": 60},
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["DATABASE_URL", "POSTGRES_USERNAME", "POSTGRES_PASSWORD"],
+              "properties": {
+                "DATABASE_URL": {"type": "string"},
+                "POSTGRES_USERNAME": {"type": "string"},
+                "POSTGRES_PASSWORD": {"type": "string"}
+              }
+            }
+          }
+        },
+        "redis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "namespace", "data"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "namespace": {"type": "string"},
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["REDIS_SERVER_HOST", "REDIS_SERVER_PORT", "REDIS_SERVER_USERNAME", "REDIS_SERVER_PASSWORD", "REDIS_SERVER_DATABASE"],
+              "properties": {
+                "REDIS_SERVER_HOST": {"type": "string"},
+                "REDIS_SERVER_PORT": {"type": "string"},
+                "REDIS_SERVER_USERNAME": {"type": "string"},
+                "REDIS_SERVER_PASSWORD": {"type": "string"},
+                "REDIS_SERVER_DATABASE": {"type": "string"}
+              }
+            }
+          }
+        }
       }
     },
-    "persistence": {"type": "object", "required": ["storage", "config"], "properties": {"storage": {"type": "object", "required": ["existingClaim", "size", "storageClass"]}, "config": {"type": "object", "required": ["existingClaim", "size", "storageClass"]}}},
-    "routing": {"type": "object", "required": ["mode", "host", "ingress", "gateway"], "properties": {"mode": {"enum": ["none", "ingress", "gateway"]}, "host": {"type": "string", "minLength": 1}, "ingress": {"type": "object", "required": ["className", "annotations", "tlsSecretName"], "properties": {"className": {"type": "string", "minLength": 1}, "annotations": {"type": "object"}, "tlsSecretName": {"type": "string", "minLength": 1}}}, "gateway": {"type": "object", "required": ["name", "namespace", "httpSectionName", "httpsSectionName"], "properties": {"name": {"type": "string", "minLength": 1}, "namespace": {"type": "string", "minLength": 1}, "httpSectionName": {"type": "string", "minLength": 1}, "httpsSectionName": {"type": "string", "minLength": 1}}}}},
     "resources": {"type": "object"},
-    "migrationResources": {"type": "object"}
-  }
+    "migrationResources": {"type": "object"},
+    "migrationActiveDeadlineSeconds": {"type": "integer", "minimum": 60},
+    "jobRetentionSeconds": {"type": "integer", "minimum": 0},
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "name"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string"}
+      }
+    },
+    "securityContext": {"type": "object"},
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storage", "config"],
+      "properties": {
+        "storage": {"$ref": "#/definitions/affineClaim"},
+        "config": {"$ref": "#/definitions/affineClaim"}
+      }
+    },
+    "probes": {"type": "object"},
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port"],
+      "properties": {
+        "type": {"enum": ["ClusterIP", "NodePort", "LoadBalancer"]},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "host", "ingress", "gateway"],
+      "properties": {
+        "mode": {"enum": ["none", "ingress", "gateway"]},
+        "host": {"type": "string", "minLength": 1},
+        "ingress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["className", "annotations", "tlsSecretName"],
+          "properties": {
+            "className": {"type": "string", "minLength": 1},
+            "annotations": {"type": "object"},
+            "tlsSecretName": {"type": "string", "minLength": 1}
+          }
+        },
+        "gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "namespace", "httpSectionName", "httpsSectionName"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "namespace": {"type": "string", "minLength": 1},
+            "httpSectionName": {"type": "string", "minLength": 1},
+            "httpsSectionName": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["serverName", "externalUrl"],
+      "properties": {
+        "serverName": {"type": "string", "minLength": 1},
+        "externalUrl": {"type": "string", "pattern": "^https?://"}
+      }
+    }
+  },
+  "definitions": {
+    "affineClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "existingClaim", "retain", "size", "storageClass"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "existingClaim": {"type": "string"},
+        "retain": {"type": "boolean"},
+        "size": {"type": "string", "minLength": 1},
+        "storageClass": {"type": "string", "minLength": 1}
+      }
+    },
+    "prerequisiteClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "existingClaim", "retain"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "existingClaim": {"type": "string"},
+        "retain": {"type": "boolean"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"secrets": {"properties": {"mode": {"const": "existing"}}}}},
+      "then": {
+        "properties": {
+          "secrets": {
+            "properties": {
+              "database": {"required": ["name"], "properties": {"name": {"minLength": 1}}},
+              "redis": {"required": ["name"], "properties": {"name": {"minLength": 1}}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "secrets": {"properties": {"mode": {"const": "create"}}},
+          "databaseProvisioning": {"properties": {"enabled": {"const": true}}},
+          "application": {"properties": {"enabled": {"const": true}}}
+        }
+      },
+      "then": {
+        "properties": {
+          "secrets": {
+            "properties": {
+              "database": {
+                "properties": {
+                  "data": {
+                    "required": ["POSTGRES_USERNAME", "POSTGRES_PASSWORD"],
+                    "properties": {
+                      "POSTGRES_USERNAME": {"minLength": 1},
+                      "POSTGRES_PASSWORD": {"minLength": 1}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "secrets": {"properties": {"mode": {"const": "create"}}},
+          "migration": {"properties": {"enabled": {"const": true}}},
+          "databaseProvisioning": {"properties": {"enabled": {"const": true}}}
+        }
+      },
+      "then": {
+        "properties": {
+          "secrets": {
+            "properties": {
+              "database": {
+                "properties": {
+                  "data": {
+                    "required": ["POSTGRES_USERNAME", "POSTGRES_PASSWORD"],
+                    "properties": {
+                      "POSTGRES_USERNAME": {"minLength": 1},
+                      "POSTGRES_PASSWORD": {"minLength": 1}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"persistence": {"properties": {"storage": {"properties": {"create": {"const": false}}}}}}},
+      "then": {
+        "properties": {
+          "persistence": {
+            "properties": {
+              "storage": {"required": ["existingClaim"], "properties": {"existingClaim": {"minLength": 1}}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"persistence": {"properties": {"config": {"properties": {"create": {"const": false}}}}}}},
+      "then": {
+        "properties": {
+          "persistence": {
+            "properties": {
+              "config": {"required": ["existingClaim"], "properties": {"existingClaim": {"minLength": 1}}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "prerequisites": {
+            "properties": {
+              "redis": {"properties": {"persistence": {"properties": {"create": {"const": false}}}}}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "prerequisites": {
+            "properties": {
+              "redis": {
+                "properties": {
+                  "persistence": {"required": ["existingClaim"], "properties": {"existingClaim": {"minLength": 1}}}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "prerequisites": {
+            "properties": {
+              "database": {"properties": {"persistence": {"properties": {"create": {"const": false}}}}}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "prerequisites": {
+            "properties": {
+              "database": {
+                "properties": {
+                  "persistence": {"required": ["existingClaim"], "properties": {"existingClaim": {"minLength": 1}}}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

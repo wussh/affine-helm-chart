@@ -1,4 +1,5 @@
 # One-time Helm-to-ArgoCD ownership adoption. No credentials.
+# secrets.mode=existing: the live affine-database/affine-redis Secrets are kept as-is.
 application:
   enabled: true
 migration:

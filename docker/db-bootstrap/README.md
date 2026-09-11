@@ -9,6 +9,12 @@ Utility image for AFFiNE Helm chart DB provisioning Job.
 | `wait-and-load-secrets.sh` | Polls Kubernetes Secrets until all keys are non-empty; decodes to `/run/affine-secrets` |
 | `wait-postgres.sh` | Waits for PostgreSQL/PgBouncer readiness via `pg_isready` |
 | `provision-db.sh` | Creates app role + database idempotently; safe on repeated Helm upgrades |
+| `wait-migration.sh` | Deployment initContainer gate on the migration completion marker written by `mark-migration-complete.sh` |
+| `mark-migration-complete.sh` | Writes the `affine_deployment_state` migration marker after migrations succeed |
+
+The chart's bootstrap Job patches `.data.DATABASE_URL` with `kubectl patch`
+(never `apply`) and is defined inline in the Helm template; it does not require
+a script in this image.
 
 ## Environment variables
 
