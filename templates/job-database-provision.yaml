@@ -1,0 +1,104 @@
+{{- if .Values.databaseProvisioning.enabled }}
+{{- $img := .Values.databaseProvisioning.image }}
+{{- $bootstrapImage := printf "%s:%s" $img.repository $img.tag }}
+{{- if $img.digest }}
+{{- $bootstrapImage = printf "%s@%s" $img.repository $img.digest }}
+{{- end }}
+{{- $jobSecurityContext := deepCopy .Values.securityContext }}
+{{- $_ := set $jobSecurityContext "readOnlyRootFilesystem" true }}
+{{- $_ := set $jobSecurityContext "runAsNonRoot" true }}
+{{- $_ := set $jobSecurityContext "runAsUser" 10001 }}
+{{- $_ := set $jobSecurityContext "runAsGroup" 101 }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "affine.databaseProvisioningJobName" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.migrationActiveDeadlineSeconds }}
+  {{- if gt (int .Values.jobRetentionSeconds) 0 }}
+  ttlSecondsAfterFinished: {{ .Values.jobRetentionSeconds }}
+  {{- end }}
+  template:
+    metadata:
+      labels: {{- include "affine.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "affine.fullname" . }}-bootstrap
+      automountServiceAccountToken: true
+      securityContext:
+        fsGroup: 101
+      initContainers:
+        - name: wait-and-load-secrets
+          image: {{ $bootstrapImage }}
+          imagePullPolicy: {{ $img.pullPolicy }}
+          command: ["/scripts/wait-and-load-secrets.sh"]
+          env:
+            - name: ADMIN_SECRET_NAMESPACE
+              value: {{ include "affine.prerequisiteDatabaseNamespace" . | quote }}
+            - name: ADMIN_SECRET_NAME
+              value: {{ include "affine.databaseAdminSecretName" . | quote }}
+            - name: ADMIN_HOST_KEY
+              value: {{ .Values.databaseProvisioning.admin.hostKey | quote }}
+            - name: ADMIN_PORT_KEY
+              value: {{ .Values.databaseProvisioning.admin.portKey | quote }}
+            - name: ADMIN_USERNAME_KEY
+              value: {{ .Values.databaseProvisioning.admin.usernameKey | quote }}
+            - name: ADMIN_PASSWORD_KEY
+              value: {{ .Values.databaseProvisioning.admin.passwordKey | quote }}
+            - name: APP_SECRET_NAMESPACE
+              value: {{ include "affine.databaseSecretNamespace" . | quote }}
+            - name: APP_SECRET_NAME
+              value: {{ include "affine.databaseApplicationSecretName" . | quote }}
+            - name: APP_USERNAME_KEY
+              value: {{ .Values.databaseProvisioning.application.usernameKey | quote }}
+            - name: APP_PASSWORD_KEY
+              value: {{ .Values.databaseProvisioning.application.passwordKey | quote }}
+            - name: WAIT_INTERVAL_SECONDS
+              value: {{ .Values.databaseProvisioning.waitIntervalSeconds | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.databaseProvisioning.waitTimeoutSeconds | quote }}
+          securityContext: {{- toYaml $jobSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: secret-data
+              mountPath: /run/affine-secrets
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: provision-db
+          image: {{ $bootstrapImage }}
+          imagePullPolicy: {{ $img.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              /scripts/wait-postgres.sh
+              /scripts/provision-db.sh
+          env:
+            - name: APP_DATABASE
+              value: {{ .Values.databaseProvisioning.database | quote }}
+            - name: WAIT_INTERVAL_SECONDS
+              value: {{ .Values.databaseProvisioning.waitIntervalSeconds | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.databaseProvisioning.waitTimeoutSeconds | quote }}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+          securityContext: {{- toYaml $jobSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: secret-data
+              mountPath: /run/affine-secrets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: secret-data
+          emptyDir:
+            medium: Memory
+        - name: tmp
+          emptyDir:
+            medium: Memory
+{{- end }}

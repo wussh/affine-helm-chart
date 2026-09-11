@@ -1,0 +1,46 @@
+{{- if and .Values.prerequisites.enabled (eq .Values.prerequisites.database.mode "everest") (not .Values.prerequisites.database.existing) }}
+{{- $ns := include "affine.prerequisiteDatabaseNamespace" . }}
+{{- $existing := lookup "everest.percona.com/v1alpha1" "DatabaseCluster" $ns .Values.prerequisites.database.name }}
+{{- if $existing }}
+  {{- $owner := index (default (dict) $existing.metadata.annotations) "meta.helm.sh/release-name" }}
+  {{- $ownerNs := index (default (dict) $existing.metadata.annotations) "meta.helm.sh/release-namespace" }}
+  {{- if or (ne (toString $owner) .Release.Name) (ne (toString $ownerNs) .Release.Namespace) }}
+    {{- fail (printf "DatabaseCluster %s/%s already exists and is not owned by release %s/%s (owner: %s/%s). With prerequisites.database.persistencePolicy=keep it survives uninstall and blocks reinstall; set prerequisites.database.existing=true to reuse it, or delete it explicitly if you intend to recreate the database." $ns .Values.prerequisites.database.name .Release.Namespace .Release.Name (default "<none>" $ownerNs) (default "<none>" $owner)) }}
+  {{- end }}
+{{- end }}
+apiVersion: everest.percona.com/v1alpha1
+kind: DatabaseCluster
+metadata:
+  name: {{ .Values.prerequisites.database.name }}
+  namespace: {{ $ns }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+    {{- if eq .Values.prerequisites.database.persistencePolicy "keep" }}
+    # Helm keeps this resource on uninstall/upgrade. The database and its data
+    # are intentionally not owned by the application release lifecycle. On
+    # reinstall, set prerequisites.database.existing=true to reuse it instead of
+    # contending with this retained object.
+    helm.sh/resource-policy: keep
+    {{- end }}
+spec:
+  engine:
+    type: postgresql
+    version: {{ .Values.prerequisites.database.version | quote }}
+    replicas: {{ .Values.prerequisites.database.replicas }}
+    resources:
+      cpu: "1"
+      memory: 2G
+    storage:
+      class: {{ .Values.prerequisites.database.storageClass }}
+      size: {{ .Values.prerequisites.database.storageSize }}
+    userSecretsName: {{ include "affine.databaseBootstrapSecretName" . }}
+  proxy:
+    type: pgbouncer
+    replicas: 1
+    expose:
+      type: ClusterIP
+    resources:
+      cpu: 500m
+      memory: 512Mi
+{{- end }}

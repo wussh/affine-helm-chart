@@ -1,0 +1,128 @@
+{{- if .Values.application.enabled }}
+{{- $checksum := include "affine.migrationChecksum" . }}
+{{- $migrationVersion := printf "%s-%s" .Chart.AppVersion $checksum }}
+{{- $bootstrapImg := printf "%s@%s" .Values.databaseProvisioning.image.repository .Values.databaseProvisioning.image.digest }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "affine.fullname" . }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels: {{- include "affine.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "affine.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "affine.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      initContainers:
+        # Gate startup on the Secret keys the containers reference. The mounted
+        # files come from the same kubelet cache that resolves secretKeyRef, so
+        # the main container never starts before DATABASE_URL exists and never
+        # reports CreateContainerConfigError. Values are never printed.
+        - name: wait-for-secrets
+          image: {{ $bootstrapImg }}
+          imagePullPolicy: {{ .Values.databaseProvisioning.image.pullPolicy }}
+          command: [/bin/sh, -ec]
+          args:
+            - |
+{{ include "affine.waitForDependenciesScript" . | indent 14 }}
+          env:
+            - name: WAIT_INTERVAL_SECONDS
+              value: {{ .Values.secrets.database.waitIntervalSeconds | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.secrets.database.waitTimeoutSeconds | quote }}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits:   {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 101
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: database-secret-wait, mountPath: /run/affine-secret-wait/database, readOnly: true}
+            - {name: redis-secret-wait, mountPath: /run/affine-secret-wait/redis, readOnly: true}
+        {{- if .Values.migration.enabled }}
+        - name: wait-migration
+          image: {{ $bootstrapImg }}
+          imagePullPolicy: {{ .Values.databaseProvisioning.image.pullPolicy }}
+          command: [/scripts/wait-migration.sh]
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ include "affine.databaseSecretName" . }}, key: DATABASE_URL}}
+            - name: EXPECTED_MIGRATION_VERSION
+              value: {{ $migrationVersion | quote }}
+            - name: WAIT_INTERVAL_SECONDS
+              value: {{ .Values.migration.waitIntervalSeconds | default 5 | quote }}
+            - name: WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.migrationActiveDeadlineSeconds | quote }}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits:   {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 101
+            seccompProfile: {type: RuntimeDefault}
+        {{- end }}
+      containers:
+        - name: affine
+          image: {{ include "affine.image" . }}
+          ports: [{name: http, containerPort: 3010}]
+          env:
+            - name: AFFINE_CONFIG_PATH
+              value: /root/.affine/config
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ include "affine.databaseSecretName" . }}, key: DATABASE_URL}}
+            {{- range $key := list "REDIS_SERVER_HOST" "REDIS_SERVER_PORT" "REDIS_SERVER_USERNAME" "REDIS_SERVER_PASSWORD" "REDIS_SERVER_DATABASE" }}
+            - name: {{ $key }}
+              valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" $ }}, key: {{ $key }}}}
+            {{- end }}
+          startupProbe: {{- toYaml .Values.probes.startup | nindent 12 }}
+          readinessProbe: {{- toYaml .Values.probes.readiness | nindent 12 }}
+          livenessProbe: {{- toYaml .Values.probes.liveness | nindent 12 }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - {name: storage, mountPath: /root/.affine/storage}
+            - {name: config, mountPath: /root/.affine/config}
+            - {name: config-file, mountPath: /root/.affine/config/config.json, subPath: config.json, readOnly: true}
+      volumes:
+        - {name: storage, persistentVolumeClaim: {claimName: {{ include "affine.storageClaimName" . }}}}
+        - {name: config, persistentVolumeClaim: {claimName: {{ include "affine.configClaimName" . }}}}
+        - {name: config-file, configMap: {name: {{ include "affine.fullname" . }}-config}}
+        # optional: true keeps the pod schedulable while the Secret/key is absent;
+        # the init container blocks until the keys appear.
+        - name: database-secret-wait
+          secret:
+            secretName: {{ include "affine.databaseSecretName" . }}
+            optional: true
+            items:
+              - {key: DATABASE_URL, path: DATABASE_URL}
+        - name: redis-secret-wait
+          secret:
+            secretName: {{ include "affine.redisSecretName" . }}
+            optional: true
+            items:
+              - {key: REDIS_SERVER_HOST, path: REDIS_SERVER_HOST}
+              - {key: REDIS_SERVER_PORT, path: REDIS_SERVER_PORT}
+              - {key: REDIS_SERVER_USERNAME, path: REDIS_SERVER_USERNAME}
+              - {key: REDIS_SERVER_PASSWORD, path: REDIS_SERVER_PASSWORD}
+              - {key: REDIS_SERVER_DATABASE, path: REDIS_SERVER_DATABASE}
+{{- end }}

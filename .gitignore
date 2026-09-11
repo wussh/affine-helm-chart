@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Local session and tooling state, never shared.
+.remember/
+.claude/
+.serena/
+

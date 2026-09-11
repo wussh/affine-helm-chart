@@ -1,0 +1,23 @@
+# Static test fixture: explicit opt-in to DatabaseCluster deletion on uninstall.
+application:
+  enabled: true
+migration:
+  enabled: true
+prerequisites:
+  enabled: true
+  database:
+    mode: everest
+    name: db-affine
+    namespace: prod
+    userSecretName: everest-secrets-db-affine
+    persistencePolicy: delete
+  redis:
+    enabled: true
+secrets:
+  mode: existing
+  database:
+    name: affine-database
+  redis:
+    name: affine-redis
+routing:
+  mode: none
