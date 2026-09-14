@@ -1,0 +1,58 @@
+# Platform-managed AFFiNE deployment.
+#
+# PostgreSQL, Redis, and their credential Secrets are owned outside this Helm
+# release. This avoids ownership conflicts with a separate platform GitOps
+# application. Populate affine-database and affine-redis before installing.
+#
+# This file contains no credentials. Copy it into the platform GitOps repository
+# and change only environment-specific non-secret settings there.
+application:
+  enabled: true
+migration:
+  enabled: true
+
+# Keep completed normal Jobs present while Argo CD adoption is manual. The chart
+# does not yet prove reconciliation safety after TTL deletion; do not enable
+# Argo CD self-heal or prune until that behavior is covered by an integration
+# test. Clean up superseded Jobs deliberately after a successful release.
+jobRetentionSeconds: 0
+
+# The platform owns the database and Redis resources. The chart consumes their
+# connection values from existing namespace-local Secrets only.
+databaseProvisioning:
+  enabled: false
+prerequisites:
+  enabled: false
+  database:
+    mode: external
+  redis:
+    enabled: false
+
+secrets:
+  mode: existing
+  database:
+    name: affine-database
+  redis:
+    name: affine-redis
+
+persistence:
+  storage:
+    create: true
+    existingClaim: ""
+    retain: true
+    size: 20Gi
+    storageClass: storage-nvme-c1
+  config:
+    create: true
+    existingClaim: ""
+    retain: true
+    size: 1Gi
+    storageClass: storage-nvme-c1
+
+routing:
+  mode: ingress
+  host: affine.dev.tbs.cloudeka.xyz
+
+config:
+  serverName: AFFiNE Internal
+  externalUrl: https://affine.dev.tbs.cloudeka.xyz
