@@ -20,6 +20,7 @@
 #   resources / migrationResources    CPU/memory for app and migration
 #   migrationActiveDeadlineSeconds    migration Job deadline
 #   serviceAccount.* / securityContext
+#   extraEnvFrom                      extra envFrom sources for the app
 #   persistence.*                     AFFiNE storage + config claims
 #   probes.* / service.*              health checks and Service
 #   routing.*                         none | ingress | gateway exposure
@@ -41,21 +42,25 @@ application:
 migration:
   enabled: false
   # Bump this whenever the migration Job template changes materially. It is
-  # folded into the Job's checksum name so the name rotates instead of Helm
-  # trying to patch immutable Job fields on upgrade.
+  # rendered into the migration pod template as the annotation
+  # affine.dev/migration-template-revision, so it is part of the checksum that
+  # names the Job: bumping it rotates the name instead of Helm trying to patch
+  # immutable Job fields on upgrade.
   templateRevision: "2"
   # How often (seconds) the Deployment's wait-migration init container polls
   # the database for the migration completion marker.
   waitIntervalSeconds: 5
 
 # Time-to-live applied as `ttlSecondsAfterFinished` to every finished Job
-# (bootstrap, database-provision, migration). Bounds Job accumulation across
-# repeated upgrades: Job names are checksum-versioned, so without a TTL each
-# changed revision would leave its Jobs behind forever.
-#   > 0  delete a finished Job after this many seconds (default 3600 = 1h,
-#        long enough to inspect a failed Job's logs and events)
-#   0    keep finished Jobs forever (not recommended; history grows unbounded)
-jobRetentionSeconds: 3600
+# (bootstrap, database-provision, migration).
+#   0    (default) keep finished Jobs and render no `ttlSecondsAfterFinished`
+#        field at all. Required for GitOps: a TTL-deleted Job is a missing
+#        resource for Argo CD, and the next sync recreates it and re-runs the
+#        migration. Retention is bounded instead by the checksum-versioned Job
+#        names: an unchanged release reuses one Job per component.
+#   > 0  delete a finished Job after this many seconds. `ttlSecondsAfterFinished`
+#        is then rendered with this value.
+jobRetentionSeconds: 0
 
 # Optional creation of the application database role and database.
 # Requires prerequisites.enabled=true (the bootstrap Job is what publishes the
@@ -268,6 +273,14 @@ securityContext:
     drop: [ALL]
   seccompProfile:
     type: RuntimeDefault
+
+# Extra `envFrom` sources for the AFFiNE application container only. Use it to
+# inject additional ConfigMaps/Secrets (for example a shared runtime config).
+# Database and Redis configuration must go through secrets.* instead.
+#   extraEnvFrom:
+#     - configMapRef: {name: affine-extra-config}
+#     - secretRef:    {name: affine-extra-runtime, optional: true}
+extraEnvFrom: []
 
 # AFFiNE storage and config claims.
 #   create=true  -> chart renders the PVC (named <release>-storage /

@@ -14,6 +14,10 @@ Checks:
   --pvc-names A,B         these PersistentVolumeClaim names are rendered
   --no-pvc-substr S       no PVC name contains S
   --no-pvc                no PersistentVolumeClaim objects are rendered
+  --job-ttl               every rendered Job has a positive ttlSecondsAfterFinished
+  --job-ttl-absent        no rendered Job has a ttlSecondsAfterFinished field
+  --job-ttl-equals N      every rendered Job has ttlSecondsAfterFinished == N
+  --extra-envfrom NAME    the affine container has an envFrom entry for NAME
   --databasecluster       a DatabaseCluster is rendered
   --no-databasecluster    no DatabaseCluster is rendered
   --dc-keep               DatabaseCluster carries helm.sh/resource-policy: keep
@@ -42,6 +46,11 @@ while i < len(args):
         continue
     if a in ("--pvc-names", "--no-pvc-substr"):
         values[a] = args[i + 1].split(",")
+        flags.add(a)
+        i += 2
+        continue
+    if a in ("--job-ttl-equals", "--extra-envfrom"):
+        values.setdefault(a, []).append(args[i + 1])
         flags.add(a)
         i += 2
         continue
@@ -248,6 +257,46 @@ if "--job-ttl" in flags:
             fail(f"Job/{j['metadata']['name']} has no ttlSecondsAfterFinished (unbounded history)")
         elif not isinstance(ttl, int) or ttl < 1:
             fail(f"Job/{j['metadata']['name']} has invalid ttlSecondsAfterFinished={ttl!r}")
+
+if "--job-ttl-absent" in flags:
+    # jobRetentionSeconds=0 must render no TTL field at all: a TTL-deleted Job is
+    # a missing desired resource for Argo CD, and the next sync recreates it and
+    # re-runs the migration.
+    for j in by_kind("Job"):
+        if "ttlSecondsAfterFinished" in j["spec"]:
+            fail(f"Job/{j['metadata']['name']} renders ttlSecondsAfterFinished="
+                 f"{j['spec']['ttlSecondsAfterFinished']!r} with jobRetentionSeconds=0")
+
+if "--job-ttl-equals" in flags:
+    want = int(values["--job-ttl-equals"][-1])
+    jobs = by_kind("Job")
+    if not jobs:
+        fail("no Job rendered to check ttlSecondsAfterFinished")
+    for j in jobs:
+        ttl = j["spec"].get("ttlSecondsAfterFinished")
+        if ttl != want:
+            fail(f"Job/{j['metadata']['name']} has ttlSecondsAfterFinished={ttl!r}, expected {want}")
+
+if "--extra-envfrom" in flags:
+    # The extension point must reach the application container: an envFrom that
+    # silently lands nowhere would hide a misconfiguration.
+    apps = [d for d in by_kind("Deployment")
+            if d.get("metadata", {}).get("name") == release]
+    if len(apps) != 1:
+        fail(f"expected exactly one AFFiNE Deployment named {release!r}, found {len(apps)}")
+    else:
+        cont = next((c for c in apps[0]["spec"]["template"]["spec"].get("containers") or []
+                     if c.get("name") == "affine"), None)
+        if cont is None:
+            fail("AFFiNE Deployment has no affine container")
+        else:
+            entries = cont.get("envFrom") or []
+            refs = {(e.get("configMapRef") or {}).get("name") for e in entries}
+            refs |= {(e.get("secretRef") or {}).get("name") for e in entries}
+            for name in values["--extra-envfrom"]:
+                if name not in refs:
+                    fail(f"affine container envFrom does not reference {name!r} "
+                         f"(got {sorted(r for r in refs if r)})")
 
 if "--selector-compat" in flags:
     # Immutable Deployment selectors must stay byte-identical to 0.2.0, which
