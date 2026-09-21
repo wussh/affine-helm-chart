@@ -1,6 +1,5 @@
 {{- if .Values.application.enabled }}
-{{- $checksum := include "affine.migrationChecksum" . }}
-{{- $migrationVersion := printf "%s-%s" .Chart.AppVersion $checksum }}
+{{- $migrationVersion := include "affine.migrationVersion" . }}
 {{- $bootstrapImg := printf "%s@%s" .Values.databaseProvisioning.image.repository .Values.databaseProvisioning.image.digest }}
 apiVersion: apps/v1
 kind: Deployment
@@ -94,6 +93,9 @@ spec:
             - name: {{ $key }}
               valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" $ }}, key: {{ $key }}}}
             {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom: {{- toYaml . | nindent 12 }}
+          {{- end }}
           startupProbe: {{- toYaml .Values.probes.startup | nindent 12 }}
           readinessProbe: {{- toYaml .Values.probes.readiness | nindent 12 }}
           livenessProbe: {{- toYaml .Values.probes.liveness | nindent 12 }}

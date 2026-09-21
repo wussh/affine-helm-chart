@@ -3,10 +3,10 @@
 | Field | Value |
 | --- | --- |
 | Status | Pre-production; chart static suite passes, production rollout gates remain |
-| Chart | `affine` `0.2.1` (AFFiNE `0.27.4`) |
+| Chart | `affine` `0.2.2` (AFFiNE `0.27.4`) |
 | Repository | [`Lintasarta/affine-helm`](https://github.com/Lintasarta/affine-helm) |
 | Target platform | `tbs-dev`, GitOps-managed through Argo CD |
-| Last verified | 2026-09-14 (`bash tests/chart-tests.sh`: 27/27 static checks) |
+| Last verified | 2026-09-21 (`bash tests/chart-tests.sh`: 54/54 static checks; opt-in cluster suite: 21/21 checks in a disposable namespace) |
 
 ## Background
 
@@ -128,9 +128,24 @@ In the platform-owned model bootstrap is deliberately absent because `secrets.mo
 
 ### Job lifecycle: current production gate
 
-Job names include checksums so some changes rotate names rather than patching immutable Job pod templates. The checksums do not cover every current Job pod-template input (for example helper-image and some runtime/security inputs), so some changes can still produce immutable-field upgrade failures.
+Migration Job names include a hash of the rendered migration pod template, so a
+pod-template change rotates the name rather than patching an immutable Job pod
+template. The hash covers image repository and digest, migration resources,
+container security context, ServiceAccount, helper image, database/Redis Secret
+names, Secret-wait timings, pod labels, and the
+`affine.dev/migration-template-revision` annotation (`migration.templateRevision`).
+Unrelated values (routing, `config.*`, Service port, PVC size, application
+resources, probes) do not rotate the name.
 
-Finished Jobs default to `jobRetentionSeconds: 3600`. Once the TTL controller removes a normal desired Job, a later Helm upgrade or Argo CD reconciliation can recreate it. The chart does not yet prove migration work is skipped when the existing database marker already matches. Consequently, do not claim repeated reconciliation cannot rerun migration; keep Argo CD self-heal and prune disabled for initial adoption; use `jobRetentionSeconds: 0` only as the documented manual-adoption guardrail; and close checksum/reconciliation tests before production automation.
+Finished Jobs are kept: `jobRetentionSeconds: 0` (default) renders no
+`ttlSecondsAfterFinished` field, so a GitOps reconciler never observes a missing
+desired Job and never recreates it (a recreation re-runs the migration). With
+`jobRetentionSeconds: N > 0` the TTL controller removes a normal desired Job, and
+a later Helm upgrade or Argo CD reconciliation can recreate it. The chart does
+not prove migration work is skipped when the existing database marker already
+matches, so keep Argo CD self-heal and prune disabled for initial adoption and
+close the reconciliation/migration-idempotence tests before production
+automation.
 
 ## Platform integration
 
@@ -161,7 +176,7 @@ Finished Jobs default to `jobRetentionSeconds: 3600`. Once the TTL controller re
 
 ### Current evidence
 
-- `bash tests/chart-tests.sh` passed all 27 static tests in this repository on 2026-09-14 with Helm 4.2.4. It covers linting, render assertions, schema failures, Secret/PVC lifecycle cases, and helper script tests.
+- `bash tests/chart-tests.sh` passed all 54 static tests in this repository on 2026-09-21 with Helm 4.2.0, and the opt-in cluster suite (`AFFINE_CLUSTER_TEST=1`, disposable namespace) passed all 21 of its checks against `tbs-dev`: fresh install, no `CreateContainerConfigError`/`Multi-Attach`, idempotent upgrade with unchanged PVC UIDs, identical-upgrade migration Job identity (name and UID unchanged, application pod not restarted), migration-Job-name rotation on a pod-template change, uninstall retention, and reinstall without `--force`. It covers linting, render assertions, schema failures, Secret/PVC lifecycle cases, Job retention and naming, and helper script tests.
 - A `tbs-dev` development test release is Argo CD-tracked and runs chart `0.2.1` with container PostgreSQL and Redis. It uses a separate development source, a floating branch, automated sync, and `routing.mode=none`; it is **not** evidence for this repository's pinned-revision, manual-sync, HTTPS production policy.
 - No supplied fixture renders an Ingress, and no current test proves external HTTPS, WebSocket, administrator creation, workspace features, or actual AFFiNE content persistence.
 
@@ -178,7 +193,7 @@ Finished Jobs default to `jobRetentionSeconds: 3600`. Once the TTL controller re
 
 1. Commit one valid, non-secret platform values file based on `examples/values-platform-managed.yaml`; remove unsupported legacy values and configure either pinned Argo CD multi-source or co-located chart values.
 2. Prove PostgreSQL/PgBouncer and Redis connectivity from namespace `affine` before application sync.
-3. Resolve incomplete Job checksum coverage and prove behavior after Jobs are deleted or retained under Argo CD reconciliation.
+3. Prove behavior after Jobs are deleted or retained under Argo CD reconciliation (the migration Job name now covers every pod-template input, so this is the remaining reconciliation risk).
 4. Add and test Argo CD data retention before enabling prune or self-heal.
 5. Keep external Secret writes disabled, or explicitly approve whole-Secret writer authority and metadata mutation.
 6. Validate ingress/TLS, the admin flow, workspace features, persistence, and an isolated backup/restore drill.

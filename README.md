@@ -92,15 +92,58 @@ With `secrets.mode=existing` plus external/platform prerequisites, bootstrap is 
 
 ### Job lifecycle and reconciliation limits
 
-Jobs use checksum-bearing names, but current checksums do not cover every immutable pod-template input. Some changes can still fail as immutable Job updates; extend checksum coverage and test the release before changing helper images or runtime/security inputs.
+Migration Job names are `<release>-migration-<appVersion>-<8-hex>`, where the
+hash covers the **rendered** migration pod template: image repository and digest,
+migration resources, container security context, ServiceAccount, helper
+(bootstrap) image, database/Redis Secret names, Secret-wait timings, pod labels,
+and the `affine.dev/migration-template-revision` annotation driven by
+`migration.templateRevision`. Any of those inputs changing rotates the Job name
+instead of failing as an immutable Job update. Unrelated values (routing,
+`config.*`, Service port, PVC size, application resources, probes) do not rotate
+it, so a config edit does not leave another Job behind. The same hash produces
+the migration marker `<appVersion>-<8-hex>`: the migration Job publishes it and
+the Deployment's `wait-migration` gate compares it exactly.
 
-Every Job receives `ttlSecondsAfterFinished` when `jobRetentionSeconds > 0` (default `3600`). TTL bounds retained history but removes a normal desired Job; a later Helm upgrade or Argo CD reconciliation can recreate it. The chart does not yet prove that a recreated migration Job skips work when its database marker already matches.
+`jobRetentionSeconds: 0` (default) renders **no** `ttlSecondsAfterFinished` field
+at all. Completed Jobs are kept, so a GitOps reconciler never sees a missing
+desired Job and never recreates it — a recreation re-runs the migration.
+Retention is bounded by the checksum-versioned names instead: an unchanged
+release reuses one Job per component, and a pod-template change replaces it.
 
-`jobRetentionSeconds: 0` keeps Jobs for manual adoption and prevents TTL-driven absence, at the cost of deliberate cleanup of superseded Jobs. Keep Argo CD self-heal and prune disabled until post-TTL reconciliation and migration idempotence are tested.
+`jobRetentionSeconds: N` with `N > 0` renders `ttlSecondsAfterFinished: N` on
+every Job. TTL deletion removes a normal desired Job, and a later Helm upgrade or
+Argo CD reconciliation can recreate it. The chart does not prove that a
+recreated migration Job skips work when the database marker already matches, so
+keep Argo CD self-heal and prune disabled for initial adoption.
 
 ### Bootstrap mutation behavior
 
 The bootstrap script uses `kubectl patch --type=merge --patch-file` for `.data.DATABASE_URL`, never `kubectl apply` or `create secret | apply`. It normally preserves unrelated Secret keys, writes temporary data with `umask 077`, and verifies the patched URL by SHA-256 without printing it. Its RBAC authority remains whole-object `patch`/`update`, and it may remove the legacy annotation described above.
+
+## Verified semantics (chart 0.2.2)
+
+* `jobRetentionSeconds: 0` renders no `ttlSecondsAfterFinished` field and keeps
+  completed Jobs (bootstrap, database-provision, migration).
+* Migration Job names are `<release>-migration-<appVersion>-<8-hex>` computed
+  from the rendered migration pod template: any pod-template change rotates the
+  name, and unrelated changes (routing, `config.*`, Service port, PVC size,
+  application resources, probes) do not.
+* AFFiNE stores data on ReadWriteOnce claims, so exactly one replica is
+  supported. `replicaCount` is schema-pinned to `1`; a render that bypasses
+  schema validation fails with an explicit `replicaCount=... is not supported:
+  AFFiNE stores data on ReadWriteOnce claims (persistence.storage/config) and
+  has no multi-replica coordination.` message.
+* `secrets.mode: existing` is read-only: the chart renders, patches, annotates,
+  and deletes no Secret, and no Role grants a write verb on the database or
+  Redis Secret. `secrets.database.allowBootstrapPatch=true` is the single
+  explicit exception.
+* Profile A (platform-owned PostgreSQL and Redis) uses
+  `examples/values-platform-managed.yaml`: `prerequisites.enabled=false`,
+  `databaseProvisioning.enabled=false`, `secrets.mode=existing`, and
+  `jobRetentionSeconds: 0`.
+* `extraEnvFrom` adds `envFrom` sources to the AFFiNE application container
+  only; the migration Job deliberately does not inherit them. Database and Redis
+  configuration must still go through `secrets.*`.
 
 ## Database lifecycle
 
@@ -260,7 +303,9 @@ The test uses disposable chart-managed PostgreSQL/Redis. With its default cleanu
 
 ## Release
 
-Update `Chart.yaml` (version + app version), the migration Job checksum inputs
-and image digests, `values.schema.json`, the tests and `CHANGELOG.md` together.
-Never commit credentials. Validate with `helm lint --strict` and
-`./tests/chart-tests.sh` before creating an immutable release tag from `main`.
+Update `Chart.yaml` (version + app version), the migration pod-template inputs
+(`affine.migrationPodTemplate` — anything it renders rotates the Job name), image
+digests, `values.schema.json`, the tests, `helm-install-test-cases.md` and
+`CHANGELOG.md` together. Never commit credentials. Validate with
+`helm lint --strict` and `./tests/chart-tests.sh` before creating an immutable
+release tag from `main`.

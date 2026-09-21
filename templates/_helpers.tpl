@@ -172,13 +172,148 @@ false
 {{ include "affine.fullname" . }}-database-provision-{{ include "affine.databaseProvisioningChecksum" . }}
 {{- end }}
 
+{{/*
+Effective migration pod template, rendered identically by the migration Job and
+by the checksum probe, so the Job name covers every immutable pod-template input
+(image repository/digest, migration resources, security context, service
+account, helper image, Secret names and wait timings, pod labels, and the
+template revision annotation).
+
+`markerVersion` is injected by the caller: the Job passes the real migration
+marker version, the checksum probe passes a fixed placeholder. The marker
+version is derived from the checksum, so it cannot change on its own; passing a
+placeholder keeps the hash from recursing into itself.
+*/}}
+{{- define "affine.migrationPodTemplate" -}}
+{{- $markerVersion := required "markerVersion is required for affine.migrationPodTemplate" .markerVersion -}}
+{{- $bootstrapImg := printf "%s@%s" .Values.databaseProvisioning.image.repository .Values.databaseProvisioning.image.digest -}}
+metadata:
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations:
+    affine.dev/migration-template-revision: {{ .Values.migration.templateRevision | quote }}
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "affine.serviceAccountName" . }}
+  automountServiceAccountToken: false
+  initContainers:
+    # Migration must not start, or report CreateContainerConfigError, while
+    # the bootstrap Job is still preparing DATABASE_URL.
+    - name: wait-for-secrets
+      image: {{ $bootstrapImg }}
+      imagePullPolicy: {{ .Values.databaseProvisioning.image.pullPolicy }}
+      command: [/bin/sh, -ec]
+      args:
+        - |
+{{ include "affine.waitForDependenciesScript" . | indent 10 }}
+      env:
+        - name: WAIT_INTERVAL_SECONDS
+          value: {{ .Values.secrets.database.waitIntervalSeconds | quote }}
+        - name: WAIT_TIMEOUT_SECONDS
+          value: {{ .Values.secrets.database.waitTimeoutSeconds | quote }}
+      resources:
+        requests: {cpu: 50m, memory: 32Mi}
+        limits:   {cpu: 200m, memory: 64Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 101
+        seccompProfile: {type: RuntimeDefault}
+      volumeMounts:
+        - {name: database-secret-wait, mountPath: /run/affine-secret-wait/database, readOnly: true}
+        - {name: redis-secret-wait, mountPath: /run/affine-secret-wait/redis, readOnly: true}
+    - name: migrate
+      image: {{ include "affine.image" . }}
+      command: [node, ./scripts/self-host-predeploy.js]
+      env:
+        - name: AFFINE_CONFIG_PATH
+          value: /root/.affine/config
+        - name: DATABASE_URL
+          valueFrom: {secretKeyRef: {name: {{ include "affine.databaseSecretName" . }}, key: DATABASE_URL}}
+        - name: REDIS_SERVER_HOST
+          valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_HOST}}
+        - name: REDIS_SERVER_PORT
+          valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_PORT}}
+        - name: REDIS_SERVER_USERNAME
+          valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_USERNAME}}
+        - name: REDIS_SERVER_PASSWORD
+          valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_PASSWORD}}
+        - name: REDIS_SERVER_DATABASE
+          valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_DATABASE}}
+      resources: {{- toYaml .Values.migrationResources | nindent 8 }}
+      securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
+      # config/storage are node-local emptyDirs, not the ReadWriteOnce PVCs the
+      # Deployment holds: predeploy touches only the database, and mounting the
+      # shared claims deadlocks the release (migration waits for a volume the
+      # app pod already holds while the app waits for migration to finish).
+      volumeMounts:
+        - {name: tmp, mountPath: /tmp}
+        - {name: storage, mountPath: /root/.affine/storage}
+        - {name: config, mountPath: /root/.affine/config}
+  containers:
+    - name: mark-complete
+      image: {{ $bootstrapImg }}
+      imagePullPolicy: {{ .Values.databaseProvisioning.image.pullPolicy }}
+      command: [/scripts/mark-migration-complete.sh]
+      env:
+        - name: DATABASE_URL
+          valueFrom: {secretKeyRef: {name: {{ include "affine.databaseSecretName" . }}, key: DATABASE_URL}}
+        - name: MIGRATION_VERSION
+          value: {{ $markerVersion | quote }}
+      resources:
+        requests: {cpu: 50m, memory: 32Mi}
+        limits:   {cpu: 200m, memory: 64Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 101
+        seccompProfile: {type: RuntimeDefault}
+      volumeMounts: [{name: tmp, mountPath: /tmp}]
+  volumes:
+    # emptyDir, not the PVCs: the migrate initContainer must be schedulable on
+    # any node without contending for the Deployment's ReadWriteOnce claims.
+    - {name: storage, emptyDir: {}}
+    - {name: config,  emptyDir: {}}
+    - {name: tmp,     emptyDir: {medium: Memory}}
+    - name: database-secret-wait
+      secret:
+        secretName: {{ include "affine.databaseSecretName" . }}
+        optional: true
+        items:
+          - {key: DATABASE_URL, path: DATABASE_URL}
+    - name: redis-secret-wait
+      secret:
+        secretName: {{ include "affine.redisSecretName" . }}
+        optional: true
+        items:
+          - {key: REDIS_SERVER_HOST, path: REDIS_SERVER_HOST}
+          - {key: REDIS_SERVER_PORT, path: REDIS_SERVER_PORT}
+          - {key: REDIS_SERVER_USERNAME, path: REDIS_SERVER_USERNAME}
+          - {key: REDIS_SERVER_PASSWORD, path: REDIS_SERVER_PASSWORD}
+          - {key: REDIS_SERVER_DATABASE, path: REDIS_SERVER_DATABASE}
+{{- end -}}
+
+{{/* Hash of the rendered migration pod template: any pod-template change
+     rotates the Job name instead of failing as an immutable Job update. */}}
 {{- define "affine.migrationChecksum" -}}
-{{- toJson (dict "image" .Values.image.digest "migration" .Values.migration "resources" .Values.migrationResources "secretsMode" .Values.secrets.mode "databaseSecret" .Values.secrets.database.name "redisSecret" .Values.secrets.redis.name) | sha256sum | trunc 8 -}}
-{{- end }}
+{{- include "affine.migrationPodTemplate" (merge (dict "markerVersion" "checksum-probe") .) | sha256sum | trunc 8 -}}
+{{- end -}}
+
+{{/* Migration completion marker: <appVersion>-<podTemplateChecksum>. The
+     migration Job publishes it and the Deployment's wait-migration gate
+     compares it exactly, so both must use this helper. */}}
+{{- define "affine.migrationVersion" -}}
+{{- printf "%s-%s" .Chart.AppVersion (include "affine.migrationChecksum" .) -}}
+{{- end -}}
 
 {{- define "affine.migrationJobName" -}}
 {{ include "affine.fullname" . }}-migration-{{ .Chart.AppVersion | replace "." "-" }}-{{ include "affine.migrationChecksum" . }}
-{{- end }}
+{{- end -}}
 
 {{/*
 Wait for required Secret keys through an optional secret volume.
@@ -232,6 +367,9 @@ always runs, including with default values.
 {{- define "affine.validateValues" -}}
 {{- if not (has .Values.secrets.mode (list "create" "existing")) -}}
 {{- fail (printf "secrets.mode=%q is invalid; must be \"create\" or \"existing\"" .Values.secrets.mode) -}}
+{{- end -}}
+{{- if gt (int .Values.replicaCount) 1 -}}
+{{- fail (printf "replicaCount=%d is not supported: AFFiNE stores data on ReadWriteOnce claims (persistence.storage/config) and has no multi-replica coordination. Set replicaCount=1." (int .Values.replicaCount)) -}}
 {{- end -}}
 {{- if .Values.databaseProvisioning.enabled -}}
   {{- if not (or .Values.application.enabled .Values.migration.enabled) -}}

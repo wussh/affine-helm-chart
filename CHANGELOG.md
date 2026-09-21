@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.2
+
+- Safe-by-default Job retention: `jobRetentionSeconds` now defaults to `0`,
+  which renders **no** `ttlSecondsAfterFinished` field and keeps completed Jobs.
+  A TTL-deleted Job is a missing desired resource for Argo CD, and the next sync
+  recreates it and re-runs the migration. Retention is bounded by the
+  checksum-versioned Job names instead: an unchanged release reuses one Job per
+  component. `jobRetentionSeconds: N` with `N > 0` still renders the field.
+- Migration Job names now hash the **full rendered pod template** instead of a
+  hand-picked value list. Covered: `image.repository`/`image.digest`,
+  `migrationResources.*`, `securityContext.*`, `serviceAccount.*`, the bootstrap
+  helper image, `secrets.database.name`/`secrets.redis.name`,
+  `secrets.database.waitIntervalSeconds`/`waitTimeoutSeconds`, pod labels, and
+  the new `affine.dev/migration-template-revision` annotation.
+  `migration.templateRevision` is now rendered as that annotation, so bumping it
+  rotates the Job name. Changes that cannot alter the pod template (routing,
+  `config.*`, Service port, PVC size, application resources, probes) no longer
+  rotate the name and no longer leave another Job behind. The migration marker
+  version stays `<appVersion>-<podTemplateChecksum>`; the migration Job's
+  `mark-complete` container and the Deployment's `wait-migration` gate now derive
+  it from one helper, so they cannot disagree.
+- Explicit ReadWriteOnce single-replica guard: `replicaCount > 1` fails with
+  `replicaCount=N is not supported: AFFiNE stores data on ReadWriteOnce claims
+  (persistence.storage/config) and has no multi-replica coordination.` The schema
+  still pins `replicaCount` to `1`; the guard is the readable message for renders
+  that bypass schema validation. RWX multi-replica remains unsupported.
+- New `extraEnvFrom` value: extra `envFrom` sources for the AFFiNE application
+  container only (for example a shared runtime ConfigMap or Secret). The
+  migration Job deliberately does not inherit them; database and Redis
+  configuration must still go through `secrets.*`.
+- Profile A (platform-owned PostgreSQL/Redis) is lint-covered:
+  `examples/values-platform-managed.yaml` is now part of `helm lint --strict`,
+  and the deployment repository's overlay was replaced with the typed
+  `secrets.mode=existing` contract instead of the removed top-level `envFrom` key
+  that no template renders.
+- Tests: the static suite grew from 27 to 54 assertions (retention semantics,
+  migration-Job-name determinism and coverage matrix, marker-version equality,
+  replica guard, `extraEnvFrom`) and the cluster suite adds identical-upgrade Job
+  identity (name and UID unchanged, application pod not restarted) and
+  PodTemplate-change rotation.
+
 ## 0.2.1
 
 - With `secrets.mode=existing` and

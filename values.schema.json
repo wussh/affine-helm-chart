@@ -16,6 +16,7 @@
     "jobRetentionSeconds",
     "serviceAccount",
     "securityContext",
+    "extraEnvFrom",
     "persistence",
     "probes",
     "service",
@@ -215,7 +216,7 @@
     "resources": {"type": "object"},
     "migrationResources": {"type": "object"},
     "migrationActiveDeadlineSeconds": {"type": "integer", "minimum": 60},
-    "jobRetentionSeconds": {"type": "integer", "minimum": 0},
+    "jobRetentionSeconds": {"type": "integer", "minimum": 0, "default": 0},
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
@@ -226,6 +227,34 @@
       }
     },
     "securityContext": {"type": "object"},
+    "extraEnvFrom": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "prefix": {"type": "string"},
+          "configMapRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "optional": {"type": "boolean"}
+            },
+            "required": ["name"]
+          },
+          "secretRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "optional": {"type": "boolean"}
+            },
+            "required": ["name"]
+          }
+        }
+      }
+    },
     "persistence": {
       "type": "object",
       "additionalProperties": false,

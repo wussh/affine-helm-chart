@@ -123,7 +123,7 @@ Direct Helm is allowed only before Argo CD adoption. After the first Argo CD syn
 
 3. Before adoption, run the direct Helm command above with the explicit context and timeout. After adoption, change the pinned Argo CD source revision/values, review `argocd app diff`, and run an approved manual sync instead.
 4. Do not use `--force` to bypass immutable selector or Job failures. Investigate and correct the chart/versioned Job name instead.
-5. Do not assume a completed migration cannot run again. With the default one-hour Job TTL, normal desired Jobs can be recreated by later Helm/Argo reconciliation. The Job checksums also omit some pod-template inputs. Keep self-heal/prune disabled and use a manual rollout until those behaviors are fixed and tested.
+5. Do not assume a completed migration cannot run again. `jobRetentionSeconds: 0` (default) keeps completed Jobs so Argo CD never sees a missing desired Job, but a Job deleted by other means is recreated on the next sync and re-runs the migration; a changed migration pod template also creates a new Job with a new name. Keep self-heal/prune disabled and use a manual rollout until post-recreation migration behavior is proven.
 6. Do not roll back an image after an incompatible schema migration. Restore matching database and PVC backups instead.
 
 ### Isolated cluster test warning
@@ -216,7 +216,7 @@ For a retained chart-owned Everest `DatabaseCluster`, `prerequisites.database.ex
 | `wait-migration` times out | Expected migration marker is absent, or database/migration work failed | Inspect migration Job and database state; do not treat this solely as a Secret problem. |
 | Missing-key `CreateContainerConfigError` | Secret key unavailable or old chart behavior | Verify `wait-for-secrets` conditions and application Secret keys; use current chart. |
 | Migration pod has `Multi-Attach` for storage/config | Old chart mounted application RWO PVCs into migration | Upgrade to the fixed migration template, which uses `emptyDir`. |
-| Jobs reappear or Argo reports them OutOfSync | Job TTL removed normal desired Jobs | Keep self-heal disabled; use `jobRetentionSeconds: 0` for manual adoption or fix/test reconciliation behavior. |
+| Jobs reappear or Argo reports them OutOfSync | Job TTL removed normal desired Jobs (`jobRetentionSeconds > 0`) | Keep self-heal disabled; keep the default `jobRetentionSeconds: 0` (no TTL field, completed Jobs retained) or fix/test reconciliation behavior. |
 | `DatabaseCluster ... already exists and is not owned` | Two owners or retained chart-owned Everest resource | Use one ownership model. Do not render chart prerequisites over platform-owned resources. |
 | Upgrade reports immutable Job or selector field | Name/checksum did not rotate for changed immutable fields, or old selector contract | Do not use `--force`; correct the chart/release inputs and retry with a reviewed plan. |
 | Two AFFiNE releases misbehave in one namespace | Name-only selector collision | Run one AFFiNE release per namespace. |

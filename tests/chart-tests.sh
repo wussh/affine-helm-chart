@@ -75,6 +75,7 @@ expect_ok "lint examples/values-dev.yaml" helm lint --strict "$CHART" -f "$DEV"
 expect_ok "lint everest existing fixture" helm lint --strict "$CHART" -f "$FIX/values-everest-existing.yaml"
 expect_ok "lint everest create fixture" helm lint --strict "$CHART" -f "$FIX/values-everest-create.yaml"
 expect_ok "lint existing-pvc fixture" helm lint --strict "$CHART" -f "$FIX/values-existing-pvc.yaml"
+expect_ok "lint: platform-managed example" helm lint "$CHART" -f "$CHART/examples/values-platform-managed.yaml" --strict
 
 echo "# static: default values render nothing (safe, intentionally incomplete)"
 if [ -n "$(helm template affine-default "$CHART" -n affine-tests 2>"$TMP/err")" ]; then
@@ -87,7 +88,7 @@ echo "# static: rendered manifests"
 render affine-dev "$CHART" -n affine-dev -f "$DEV" &&
   assert_render "dev: waits, secrets, PVCs, labels, selectors" \
     --release affine-dev --workloads --bootstrap --secrets --no-databasecluster \
-    --selector-compat --job-ttl \
+    --selector-compat --job-ttl-absent \
     --pvc-names affine-dev-storage,affine-dev-config,affine-redis,affine-postgres-data
 
 render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" &&
@@ -106,12 +107,107 @@ render affine-tests "$CHART" -n affine-tests -f "$FIX/values-existing-pvc.yaml" 
 
 render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-create.yaml" &&
   assert_render "create mode: chart-rendered Secrets and DatabaseCluster" \
-    --release affine-tests --workloads --bootstrap --secrets --databasecluster --dc-keep --job-ttl
+    --release affine-tests --workloads --bootstrap --secrets --databasecluster --dc-keep --job-ttl-absent
 
 render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" \
     --set prerequisites.database.existing=true &&
   assert_render "existing=true reuses retained DatabaseCluster (none rendered)" \
     --release affine-tests --no-databasecluster --no-bootstrap
+
+echo "# static: job retention semantics"
+# jobRetentionSeconds=0 (default) renders no ttlSecondsAfterFinished field, so a
+# finished Job is never TTL-deleted and Argo CD never sees a missing desired Job
+# that it would recreate (re-running the migration). > 0 renders the field.
+render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" --set jobRetentionSeconds=0 &&
+  assert_render "jobRetentionSeconds=0 renders no ttlSecondsAfterFinished" \
+    --release affine-tests --job-ttl-absent
+render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" --set jobRetentionSeconds=3600 &&
+  assert_render "jobRetentionSeconds=3600 renders ttlSecondsAfterFinished=3600" \
+    --release affine-tests --job-ttl-equals 3600
+expect_fail_msg "reject negative jobRetentionSeconds" "jobRetentionSeconds" \
+  helm template t "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" --set jobRetentionSeconds=-1
+
+echo "# static: migration Job name determinism and coverage"
+# The name hashes the rendered pod template, so every immutable Job input must
+# rotate it (otherwise Helm tries an immutable Job update) and unrelated values
+# must not (otherwise every config edit leaves another Job behind).
+migration_job_name() {
+  helm template "$@" 2>/dev/null | python3 -c '
+import sys, yaml
+for d in yaml.safe_load_all(sys.stdin):
+    if d and d.get("kind") == "Job" and "-migration-" in d["metadata"]["name"]:
+        print(d["metadata"]["name"]); break'
+}
+BASE=(affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml")
+base_name="$(migration_job_name "${BASE[@]}")"
+if [ -n "$base_name" ] && [ "$base_name" = "$(migration_job_name "${BASE[@]}")" ]; then
+  ok "migration Job name is deterministic across identical renders"
+else
+  bad "migration Job name is not deterministic ($base_name)"
+fi
+# must rotate
+for variant in \
+  "image.repository=ghcr.io/example/affine" \
+  "image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000" \
+  "migrationResources.limits.memory=3Gi" \
+  "securityContext.runAsUser=1000" \
+  "serviceAccount.name=affine-migration-sa" \
+  "databaseProvisioning.image.digest=sha256:1111111111111111111111111111111111111111111111111111111111111111" \
+  "secrets.database.waitTimeoutSeconds=120" \
+  "secrets.database.name=other-database" \
+  "secrets.redis.name=other-redis" ; do
+  name="$(migration_job_name "${BASE[@]}" --set "$variant")"
+  if [ -n "$name" ] && [ "$name" != "$base_name" ]; then
+    ok "migration Job name changes for --set $variant"
+  else
+    bad "migration Job name did not change for --set $variant"
+  fi
+done
+name="$(migration_job_name "${BASE[@]}" --set-string migration.templateRevision=9)"
+if [ -n "$name" ] && [ "$name" != "$base_name" ]; then
+  ok "migration Job name changes for --set-string migration.templateRevision=9"
+else
+  bad "migration Job name did not change for --set-string migration.templateRevision=9"
+fi
+# must not rotate
+for variant in \
+  "routing.mode=ingress" \
+  "routing.host=other.example.com" \
+  "config.serverName=Other" \
+  "service.port=3011" \
+  "persistence.storage.size=21Gi" \
+  "resources.limits.memory=5Gi" \
+  "probes.readiness.periodSeconds=15" ; do
+  name="$(migration_job_name "${BASE[@]}" --set "$variant")"
+  if [ "$name" = "$base_name" ]; then
+    ok "migration Job name unchanged for --set $variant"
+  else
+    bad "migration Job name changed for unrelated --set $variant ($name)"
+  fi
+done
+# The Deployment's wait-migration gate must expect exactly the marker version
+# the migration Job publishes, or the application never starts.
+if python3 - "$CHART" "$FIX/values-everest-existing.yaml" <<'PY'
+import subprocess, sys, yaml
+chart, values = sys.argv[1], sys.argv[2]
+r = subprocess.run(["helm", "template", "affine-tests", chart, "-n", "affine-tests", "-f", values],
+                   capture_output=True, text=True)
+docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+job_marker = dep_marker = None
+for d in docs:
+    if d["kind"] == "Job" and "-migration-" in d["metadata"]["name"]:
+        job_marker = next(e["value"] for c in d["spec"]["template"]["spec"]["containers"]
+                          if c["name"] == "mark-complete" for e in c["env"] if e["name"] == "MIGRATION_VERSION")
+    if d["kind"] == "Deployment" and d["metadata"]["name"] == "affine-tests":
+        dep_marker = next(e["value"] for c in d["spec"]["template"]["spec"]["initContainers"]
+                          for e in (c.get("env") or []) if e["name"] == "EXPECTED_MIGRATION_VERSION")
+sys.exit(0 if job_marker and job_marker == dep_marker else 1)
+PY
+then
+  ok "migration marker version matches the Deployment wait-migration expectation"
+else
+  bad "migration marker version does not match the Deployment wait-migration expectation"
+fi
 
 echo "# static: 0.2.0 -> 0.2.1 selector compatibility"
 # Deployment .spec.selector is immutable. A normal upgrade is only possible if
@@ -214,6 +310,21 @@ expect_fail_msg "reject database.existing=true with mode=container" "only meanin
     --set prerequisites.database.existing=true \
     --set prerequisites.database.mode=container
 
+echo "# static: ReadWriteOnce single-replica guard and extraEnvFrom"
+# The schema rejects replicaCount>1 first. The template-level guard is the
+# explicit message for renders that bypass schema validation, and it must name
+# the real reason (ReadWriteOnce claims, no multi-replica coordination).
+expect_fail_msg "reject replicaCount>1 (schema)" "replicaCount" \
+  helm template t "$CHART" -f "$DEV" --set replicaCount=2
+expect_fail_msg "reject replicaCount>1 with an explicit ReadWriteOnce message" "ReadWriteOnce" \
+  helm template t "$CHART" -f "$DEV" --set replicaCount=2 --skip-schema-validation
+render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" \
+    --set extraEnvFrom[0].configMapRef.name=affine-extra-config &&
+  assert_render "extraEnvFrom is rendered on the application container" \
+    --release affine-tests --extra-envfrom affine-extra-config
+expect_fail_msg "reject malformed extraEnvFrom entry" "extraEnvFrom" \
+  helm template t "$CHART" -f "$DEV" --set extraEnvFrom[0].bogus=1
+
 echo "# static: credential hygiene"
 if grep -RInE 'postgresql://[^<[:space:]]+:[^<[:space:]]+@' \
   "$CHART/values.yaml" "$CHART/examples" "$CHART/tests/fixtures" >"$TMP/out" 2>/dev/null; then
@@ -275,15 +386,73 @@ if [ "${AFFINE_CLUSTER_TEST:-0}" = "1" ]; then
     bad "cluster: PVCs recreated or missing after upgrade"
   fi
 
-  # Repeated upgrades must not accumulate a Job per revision: after the TTL the
-  # controller removes finished Jobs. Assert the count stays bounded across a
-  # second upgrade wave (checksum rotation alone would not).
+  # Repeated upgrades must not accumulate a Job per revision. With
+  # jobRetentionSeconds=0 (default) nothing is TTL-deleted, and an identical
+  # upgrade reuses the same checksum-named Job; only a changed pod template adds
+  # one Job (the superseded one is then removed by the release diff).
   jobs_after_two_upgrades="$("${KCTL[@]}" -n "$NS" get job -o name 2>/dev/null | wc -l)"
   if [ "$jobs_after_two_upgrades" -le 4 ]; then
     ok "cluster: Job count bounded after repeated upgrades ($jobs_after_two_upgrades)"
   else
     bad "cluster: Job accumulation after repeated upgrades ($jobs_after_two_upgrades jobs)"
   fi
+
+  # Identical upgrade with jobRetentionSeconds=0: nothing is TTL-deleted, so an
+  # unchanged release must reuse the same Job object and must not restart the
+  # application pod.
+  mig_name="$("${KCTL[@]}" -n "$NS" get job -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -- '-migration-' | head -1)"
+  mig_uid="$("${KCTL[@]}" -n "$NS" get job "$mig_name" -o jsonpath='{.metadata.uid}')"
+  app_pod_uid="$("${KCTL[@]}" -n "$NS" get pods -l app.kubernetes.io/name=affine \
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.uid}')"
+
+  expect_ok "cluster: third identical upgrade (idempotency)" \
+    helm "${HELM_CTX[@]}" upgrade --install "$REL" "$CHART" -n "$NS" --create-namespace \
+      -f "$DEV" --wait --wait-for-jobs --timeout 15m
+  if grep -qi 'field is immutable' "$TMP/err"; then
+    bad "cluster: identical upgrade hit an immutable field"
+  else
+    ok "cluster: identical upgrade produced no immutable-field error"
+  fi
+  [ -n "$mig_name" ] && [ "$mig_name" = "$("${KCTL[@]}" -n "$NS" get job -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -- '-migration-' | head -1)" ] &&
+    ok "cluster: identical upgrade reuses the same migration Job" ||
+    bad "cluster: identical upgrade rotated the migration Job name"
+  [ -n "$mig_uid" ] && [ "$mig_uid" = "$("${KCTL[@]}" -n "$NS" get job "$mig_name" -o jsonpath='{.metadata.uid}')" ] &&
+    ok "cluster: migration Job was not recreated" || bad "cluster: migration Job was recreated"
+  if [ "$("${KCTL[@]}" -n "$NS" get pods -l app.kubernetes.io/name=affine \
+        --field-selector=status.phase=Running -o name | wc -l)" -eq 1 ] &&
+     [ -n "$app_pod_uid" ] &&
+     [ "$app_pod_uid" = "$("${KCTL[@]}" -n "$NS" get pods -l app.kubernetes.io/name=affine \
+        --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.uid}')" ]; then
+    ok "cluster: application pod was not restarted by an identical upgrade"
+  else
+    bad "cluster: application pod was restarted by an identical upgrade"
+  fi
+
+  # A changed migration pod template must rotate the Job name (Helm would fail
+  # an immutable Job update otherwise) and the new Job must complete.
+  expect_ok "cluster: upgrade with a changed migration PodTemplate" \
+    helm "${HELM_CTX[@]}" upgrade --install "$REL" "$CHART" -n "$NS" --create-namespace \
+      -f "$DEV" --set migrationResources.limits.memory=3Gi --wait --wait-for-jobs --timeout 15m
+  if grep -qi 'field is immutable' "$TMP/err"; then
+    bad "cluster: PodTemplate change hit an immutable field"
+  else
+    ok "cluster: PodTemplate change produced no immutable-field error"
+  fi
+  mig_name_new="$("${KCTL[@]}" -n "$NS" get job -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -- '-migration-' | head -1)"
+  [ -n "$mig_name_new" ] && [ "$mig_name_new" != "$mig_name" ] &&
+    ok "cluster: PodTemplate change rotated the migration Job name" ||
+    bad "cluster: PodTemplate change did not rotate the migration Job name"
+  [ "$("${KCTL[@]}" -n "$NS" get job "$mig_name_new" -o jsonpath='{.status.succeeded}')" = "1" ] &&
+    ok "cluster: new migration Job completed" || bad "cluster: new migration Job did not complete"
+  # Helm removes a resource that leaves the release manifest, so a rotated
+  # migration Job is replaced, not accumulated: exactly one migration Job is
+  # present and it is the new one. jobRetentionSeconds=0 only prevents
+  # TTL-driven deletion of a Job that is still part of the release (that is what
+  # keeps a GitOps reconciler from recreating it and re-running the migration).
+  mig_jobs_retained="$("${KCTL[@]}" -n "$NS" get job -o name | grep -c -- '-migration-')"
+  [ "$mig_jobs_retained" -eq 1 ] &&
+    ok "cluster: superseded migration Job replaced, not accumulated (jobRetentionSeconds=0)" ||
+    bad "cluster: migration Job count after rotation is not 1 ($mig_jobs_retained)"
 
   expect_ok "cluster: uninstall" helm "${HELM_CTX[@]}" uninstall "$REL" -n "$NS"
 
@@ -313,7 +482,11 @@ if [ "${AFFINE_CLUSTER_TEST:-0}" = "1" ]; then
   fi
 
   if [ "${AFFINE_CLUSTER_CLEANUP:-1}" = "1" ]; then
-    "${KCTL[@]}" -n "$NS" delete pvc --all >/dev/null 2>&1 || true
+    # --wait=false: the reinstalled pods still mount the retained PVCs, so the
+    # pvc-protection finalizer does not clear until those pods are gone and
+    # waiting here would block the suite. The namespace deletion below removes
+    # the pods and then the claims.
+    "${KCTL[@]}" -n "$NS" delete pvc --all --wait=false >/dev/null 2>&1 || true
     "${KCTL[@]}" delete namespace "$NS" --wait=false >/dev/null 2>&1 || true
     ok "cluster: cleanup requested (PVCs and namespace deletion)"
   fi
