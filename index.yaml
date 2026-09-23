@@ -3,7 +3,7 @@ entries:
   affine:
   - apiVersion: v2
     appVersion: 0.27.4
-    created: "2026-09-23T13:59:27.985807015+07:00"
+    created: "2026-09-23T14:01:49.332598016+07:00"
     description: Minimal Helm chart for self-hosted AFFiNE.
     digest: f725d7e9ac08ffd7c0061c0552b23969281fd636d9d0c729ca18f1ec146b3349
     home: https://affine.pro
@@ -16,7 +16,7 @@ entries:
     version: 0.2.3
   - apiVersion: v2
     appVersion: 0.27.4
-    created: "2026-09-23T13:59:27.980943926+07:00"
+    created: "2026-09-23T14:01:49.329480954+07:00"
     description: Minimal Helm chart for self-hosted AFFiNE.
     digest: 35177af799008f2970e931ef77266a656ec399b9b2b447e7c14829232ba47b47
     home: https://affine.pro
@@ -29,9 +29,9 @@ entries:
     version: 0.2.2
   - apiVersion: v2
     appVersion: 0.27.4
-    created: "2026-09-23T13:59:27.974503355+07:00"
+    created: "2026-09-23T14:01:49.326959531+07:00"
     description: Minimal Helm chart for self-hosted AFFiNE.
-    digest: 7b07f4ac4007ae6c8306ebc7b63a6ba105362827a0582e3b56b119ef6d7c2f78
+    digest: 5eda8ba646208de07e4c183dc2a81932329bd5ae7e0b1ca24dde79e6751012da
     home: https://affine.pro
     name: affine
     sources:
@@ -40,4 +40,4 @@ entries:
     urls:
     - https://wussh.github.io/affine-helm-chart/affine-0.2.1.tgz
     version: 0.2.1
-generated: "2026-09-23T13:59:27.969525956+07:00"
+generated: "2026-09-23T14:01:49.324456485+07:00"
