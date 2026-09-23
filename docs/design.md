@@ -191,12 +191,22 @@ automation.
 
 ## Production gates
 
-1. Commit one valid, non-secret platform values file based on `examples/values-platform-managed.yaml`; remove unsupported legacy values and configure either pinned Argo CD multi-source or co-located chart values.
-2. Prove PostgreSQL/PgBouncer and Redis connectivity from namespace `affine` before application sync.
-3. Prove behavior after Jobs are deleted or retained under Argo CD reconciliation (the migration Job name now covers every pod-template input, so this is the remaining reconciliation risk).
+1. Commit one valid, non-secret platform values file based on `examples/values-platform-managed.yaml` (or `examples/values-argocd-platform-managed.yaml` for GitOps); remove unsupported legacy values and configure either pinned Argo CD multi-source or co-located chart values.
+2. Prove PostgreSQL/PgBouncer and Redis connectivity from namespace `affine` before application sync — or enable `argocd.databaseGate.enabled=true`, which turns that preflight into a `PreSync` hook Job that waits for the database endpoint. Argo CD has no health check for `everest.percona.com/DatabaseCluster`, so without one of the two the application waves start against a database that may still be provisioning.
+3. Prove behavior after Jobs are deleted or retained under Argo CD reconciliation: `jobRetentionSeconds: 0` (default) keeps completed Jobs, and all three Job names now hash their rendered pod templates, so an unchanged release recreates nothing. The remaining gate is the two-sync proof on the target release.
 4. Add and test Argo CD data retention before enabling prune or self-heal.
 5. Keep external Secret writes disabled, or explicitly approve whole-Secret writer authority and metadata mutation.
-6. Validate ingress/TLS, the admin flow, workspace features, persistence, and an isolated backup/restore drill.
+6. Validate ingress/TLS, the admin flow, workspace features, persistence, and an isolated backup/restore drill. Until a certificate source exists, deploy with `routing.mode: none` or `routing.ingress.tls.enabled=false`; an ingress that advertises TLS with no issuer is unreachable.
+
+### Deferred: External Secrets
+
+`secrets.mode` supports `create` (chart-owned, development) and `existing`
+(read-only, production). A third mode that renders `ExternalSecret` CRs
+(`secretStoreRef`, `refreshInterval`, `dataFrom`) is deliberately **not**
+implemented: no External Secrets or Sealed Secrets operator is installed on the
+target platform today. Revisit once a secret operator exists — until then,
+platform-managed Secrets stay an out-of-band prerequisite and are never
+committed to Git.
 
 ## References
 

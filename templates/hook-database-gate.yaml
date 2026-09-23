@@ -1,0 +1,83 @@
+{{- if .Values.argocd.databaseGate.enabled }}
+{{- $gateImage := .Values.argocd.databaseGate.image | default .Values.prerequisites.bootstrap.image }}
+{{- $gate := printf "%s-db-gate" (include "affine.fullname" .) }}
+# Argo CD PreSync hook: Argo CD treats unknown CRs (for example an Everest
+# DatabaseCluster) as Healthy as soon as they exist, so sync waves do not wait
+# for `status.state: ready`. This Job makes that wait explicit before the
+# application and migration waves run.
+#
+# The Job is deliberately self-contained: DATABASE_URL arrives through
+# secretKeyRef and the script only parses host:port and probes it. It needs no
+# kubectl, no RBAC and no ServiceAccount of its own — PreSync hooks run before
+# the Sync phase, so a chart-rendered ServiceAccount, Role or RoleBinding would
+# not exist yet on the first sync.
+#
+# `helm install` ignores argocd.argoproj.io/* annotations, which is why the gate
+# is opt-in and off by default.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $gate }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: 0
+  # One probe iteration can cost up to `2 × intervalSeconds` (nc -w plus sleep),
+  # so the deadline must cover the probe timeout plus two intervals, not a fixed
+  # margin, or a large interval lets the Job be killed before it reports the
+  # timeout. intervalSeconds is schema-capped at 60.
+  activeDeadlineSeconds: {{ add (int .Values.argocd.databaseGate.timeoutSeconds) (add (mul 2 (int .Values.argocd.databaseGate.intervalSeconds)) 30) }}
+  template:
+    metadata:
+      labels: {{- include "affine.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: wait-database
+          image: {{ $gateImage }}
+          command: [sh, -ec]
+          args:
+            - |
+              [ -n "$DATABASE_URL" ] || { echo "[ERROR] DATABASE_URL is empty in Secret {{ include "affine.databaseSecretName" . }} (namespace {{ include "affine.databaseSecretNamespace" . }})" >&2; exit 1; }
+              # Strip credentials: keep everything after the last '@'.
+              HOSTPORT="${DATABASE_URL##*@}"
+              HOSTPORT="${HOSTPORT%%/*}"
+              HOST="${HOSTPORT%%:*}"
+              PORT="${HOSTPORT##*:}"
+              [ "$PORT" = "$HOSTPORT" ] && PORT=5432
+              [ -n "$HOST" ] || { echo "[ERROR] could not parse a host from DATABASE_URL" >&2; exit 1; }
+              TIMEOUT={{ .Values.argocd.databaseGate.timeoutSeconds }}
+              INTERVAL={{ .Values.argocd.databaseGate.intervalSeconds }}
+              # Wall-clock deadline: one iteration costs up to nc -w INTERVAL
+              # plus sleep INTERVAL, so counting iterations would under-count
+              # and the Job would hit activeDeadlineSeconds before printing the
+              # timeout error.
+              START="$(date +%s)"
+              while :; do
+                if nc -z -w "$INTERVAL" "$HOST" "$PORT"; then
+                  echo "[INFO] database ${HOST}:${PORT} is accepting connections; releasing the sync."
+                  exit 0
+                fi
+                ELAPSED=$(( $(date +%s) - START ))
+                if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+                  echo "[ERROR] Timeout (${TIMEOUT}s) waiting for database ${HOST}:${PORT} after ${ELAPSED}s" >&2
+                  exit 1
+                fi
+                echo "[INFO] database ${HOST}:${PORT} not reachable yet (${ELAPSED}s/${TIMEOUT}s)"
+                sleep "$INTERVAL"
+              done
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "affine.databaseSecretName" . }}
+                  key: DATABASE_URL
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+{{- end }}

@@ -10,6 +10,9 @@ metadata:
     {{- if .Values.persistence.storage.retain }}
     helm.sh/resource-policy: keep
     {{- end }}
+    {{- with .Values.persistence.storage.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: {{ .Values.persistence.storage.storageClass }}
@@ -27,6 +30,9 @@ metadata:
     argocd.argoproj.io/sync-wave: "0"
     {{- if .Values.persistence.config.retain }}
     helm.sh/resource-policy: keep
+    {{- end }}
+    {{- with .Values.persistence.config.annotations }}
+    {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   accessModes: [ReadWriteOnce]

@@ -102,8 +102,27 @@ The development example (`examples/values-dev.yaml`) is isolated and uses chart-
 - Render exactly the same values commit used by direct Helm validation.
 - Perform server-side diff review before first ownership adoption. Stop for any delete/replace of PVCs, Services, Jobs, ConfigMaps, Secrets, or the database/Redis endpoints.
 - Initial policy: manual sync, `prune: false`, no `selfHeal`, no `Force=true`, no `Replace=true`.
-- Sync waves do not make separately owned PostgreSQL, Redis, or Secrets healthy. Their readiness remains a preflight condition.
-- Existing dev test policy (floating source, automated sync, routing disabled) is not a production template.
+- Database and Secret readiness stays a preflight condition, but the chart can now wait for the database endpoint itself: set `argocd.databaseGate.enabled=true` (`examples/values-argocd-platform-managed.yaml`). The gate is a `PreSync` hook Job that injects `DATABASE_URL` with `secretKeyRef` and probes host:port until the database accepts TCP connections. It renders no ServiceAccount/Role/RoleBinding and mounts no API token on purpose: Argo CD runs PreSync hooks before the Sync phase, so chart-rendered RBAC would not exist yet on the first sync. It requires `secrets.mode: existing` and `databaseProvisioning.enabled=false` — with a chart-managed Secret the value does not exist before the bootstrap Job runs. Argo CD has no health check for `everest.percona.com/DatabaseCluster`, so without the gate (or a custom health check) the application and migration waves start against a database that may still be provisioning.
+- Alternative for teams that prefer platform configuration: add a Lua health check in `argocd-cm` so sync waves block on `status.state: ready`:
+
+  ```yaml
+  resource.customizations.health.everest.percona.com_DatabaseCluster: |
+    hs = {}
+    if obj.status ~= nil and obj.status.state == "ready" then
+      hs.status = "Healthy"; hs.message = "DatabaseCluster is ready"
+    else
+      hs.status = "Progressing"; hs.message = "Waiting for DatabaseCluster to become ready"
+    end
+    return hs
+  ```
+
+### Fresh install through Argo CD — order of operations
+
+1. Platform Application first: namespace, the Everest `DatabaseCluster`, Redis, and the out-of-band Secrets (namespace-scoped Secrets cannot be created by `--create-namespace`, and the Everest webhook rejects a `DatabaseCluster` whose `userSecretsName` Secret is missing). Wait for `status.state: ready`.
+2. Chart Application second, pinned to a tag or commit SHA, manual sync, `prune: false`, no `selfHeal`, `CreateNamespace=true`, `ServerSideApply=true`, `argocd.databaseGate.enabled=true`, `routing.mode: none`.
+3. Watch the gates: gate Job `Succeeded` → migration Job `Complete` → the marker appears in `affine_deployment_state` → Deployment Ready.
+4. Prove reconciliation before enabling automation: run a second, unchanged sync and confirm nothing is recreated (no new Job, migration marker unchanged, Application `Synced`).
+5. Only then add routing (`routing.mode: ingress` with `routing.ingress.tls.enabled=true` once a certificate source exists, or `tls.enabled=false` for plain HTTP), and keep automated sync/self-heal/prune off until the retention and restore behavior is proven on that release.
 
 ### Reconciler boundary
 
@@ -124,7 +143,8 @@ Direct Helm is allowed only before Argo CD adoption. After the first Argo CD syn
 3. Before adoption, run the direct Helm command above with the explicit context and timeout. After adoption, change the pinned Argo CD source revision/values, review `argocd app diff`, and run an approved manual sync instead.
 4. Do not use `--force` to bypass immutable selector or Job failures. Investigate and correct the chart/versioned Job name instead.
 5. Do not assume a completed migration cannot run again. `jobRetentionSeconds: 0` (default) keeps completed Jobs so Argo CD never sees a missing desired Job, but a Job deleted by other means is recreated on the next sync and re-runs the migration; a changed migration pod template also creates a new Job with a new name. Keep self-heal/prune disabled and use a manual rollout until post-recreation migration behavior is proven.
-6. Do not roll back an image after an incompatible schema migration. Restore matching database and PVC backups instead.
+6. Upgrading `0.2.2` → `0.2.3` rotates the bootstrap and database-provision Job names once (their names now hash their rendered pod templates). Expect one extra bootstrap run and one extra provision run; the migration Job name and the migration marker are unaffected. From `0.2.3` on, a pod-template change to any of the three Jobs rotates only that Job's name.
+7. Do not roll back an image after an incompatible schema migration. Restore matching database and PVC backups instead.
 
 ### Isolated cluster test warning
 

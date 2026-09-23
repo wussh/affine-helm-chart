@@ -262,6 +262,67 @@ Pass: the `affine` container carries the `envFrom` entry; a malformed entry
 fails schema validation with a message naming `extraEnvFrom`. The migration Job
 must not inherit `extraEnvFrom`.
 
+## TC-14: Ingress TLS toggle
+
+```sh
+# TLS enabled (default): spec.tls present, ssl-redirect true.
+helm template affine-tests . -n affine-tests -f examples/values-dev.yaml \
+  --set routing.mode=ingress \
+  | python3 tests/assert_render.py /dev/stdin --release affine-tests \
+      --ingress-tls-secret affine-tls
+
+# TLS disabled: no spec.tls, ssl-redirect forced to false, other annotations kept.
+helm template affine-tests . -n affine-tests -f examples/values-dev.yaml \
+  --set routing.mode=ingress --set routing.ingress.tls.enabled=false \
+  | python3 tests/assert_render.py /dev/stdin --release affine-tests \
+      --ingress-no-tls
+```
+
+Pass: with `tls.enabled=false` the Ingress renders no `spec.tls`, forces
+`nginx.ingress.kubernetes.io/ssl-redirect: "false"`, and preserves the remaining
+default annotations, so a cluster without a certificate source stays reachable
+over HTTP. With `tls.enabled=true` an empty `tlsSecretName` fails schema
+validation.
+
+## TC-15: Argo CD database gate
+
+```sh
+helm template affine-tests . -n affine-tests -f examples/values-argocd-platform-managed.yaml \
+  | python3 tests/assert_render.py /dev/stdin --release affine-tests --gate-present
+
+helm template affine-tests . -n affine-tests -f examples/values-dev.yaml \
+  | python3 tests/assert_render.py /dev/stdin --release affine-tests --gate-absent
+```
+
+Pass: with the gate enabled exactly one `<release>-db-gate` Job renders, carrying
+`argocd.argoproj.io/hook: PreSync` and `hook-delete-policy: BeforeHookCreation`,
+with `automountServiceAccountToken: false`, `DATABASE_URL` injected through
+`secretKeyRef`, and no ServiceAccount/Role/RoleBinding/kubectl anywhere in the
+render — PreSync hooks run before the Sync phase, so chart-rendered RBAC would
+not exist yet on the first sync. The script probes with `nc -z` and prints no
+Secret value. Default values render no gate. Enabling the gate with
+`secrets.mode=create` or `databaseProvisioning.enabled=true` fails validation
+with an explicit message.
+
+## TC-16: Job-name rotation and PVC annotations
+
+```sh
+# Routing/config-only changes must not rotate any Job name.
+helm template t . -n ns -f examples/values-dev.yaml --set routing.host=other.example.com
+# Pod-template changes must rotate the bootstrap Job name.
+helm template t . -n ns -f examples/values-dev.yaml --set securityContext.runAsNonRoot=false
+
+# PVC annotations reach the chart-rendered claims.
+helm template t . -n ns -f examples/values-dev.yaml \
+  --set persistence.storage.annotations."example\.com/x"=y
+```
+
+Pass: the bootstrap and database-provision Job names are stable for
+routing/config-only changes and rotate when their pod templates change; the
+migration Job name and marker are unaffected. The rendered claims carry the
+configured annotations next to `argocd.argoproj.io/sync-wave` and
+`helm.sh/resource-policy`.
+
 ## Result Record
 
 | Case | Result | Evidence |
@@ -279,3 +340,6 @@ must not inherit `extraEnvFrom`.
 | TC-11 Migration Job name coverage | [ ] | name matrix + marker equality |
 | TC-12 Single-replica guard | [ ] | schema + template failure messages |
 | TC-13 extraEnvFrom | [ ] | rendered envFrom + schema failure |
+| TC-14 Ingress TLS toggle | [ ] | rendered spec.tls + ssl-redirect |
+| TC-15 Argo CD database gate | [ ] | hook annotations + minimal RBAC |
+| TC-16 Job-name rotation / PVC annotations | [ ] | name matrix + rendered annotations |

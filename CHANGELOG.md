@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.3
+
+- Optional Ingress TLS: `routing.ingress.tls.enabled` (default `true`). With
+  `false` the Ingress renders no `spec.tls` and
+  `nginx.ingress.kubernetes.io/ssl-redirect` is forced to `"false"`, so the host
+  stays reachable over plain HTTP on clusters where no certificate source exists
+  yet (for example a missing ClusterIssuer). Other annotations are preserved.
+  `tlsSecretName` is required only when TLS is enabled (schema `if/then` plus a
+  render-time guard).
+- Argo CD database gate: `argocd.databaseGate` renders an opt-in `PreSync` hook
+  Job that injects `DATABASE_URL` with `secretKeyRef`, parses host and port and
+  probes until the database accepts TCP connections. Argo CD treats unknown CRs
+  — an Everest `DatabaseCluster` — as Healthy on creation, so sync waves
+  otherwise do not wait for `status.state: ready`. The hook is self-contained on
+  purpose (no ServiceAccount, Role, RoleBinding, kubectl or API token): PreSync
+  runs before the Sync phase, so chart-rendered RBAC would not exist yet on the
+  first sync. It requires `secrets.mode: existing` with
+  `databaseProvisioning.enabled=false`. Every probe attempt is bounded
+  (`nc -z -w <intervalSeconds>`), so an unroutable host fails with the timeout
+  message instead of hanging until the Job deadline. `helm install` ignores
+  `argocd.argoproj.io/*` annotations, hence the gate is off by default.
+- Bootstrap and database-provision Job names now hash their **rendered pod
+  template** instead of a hand-picked value list, matching the migration Job
+  pattern. Upgrading from `0.2.2` rotates those two Job names **once**, which
+  re-runs the bootstrap (idempotent) and the DatabaseCluster provision step; the
+  migration Job name and the migration marker are unaffected.
+- `persistence.storage.annotations` / `persistence.config.annotations`: extra
+  annotations for the chart-rendered claims (for example a Velero/Kasten
+  selector). Ignored when `create=false`.
+- New `examples/values-argocd-platform-managed.yaml`: Profile A values for a
+  GitOps install (Job retention `0`, database gate enabled, `routing.mode: none`
+  until an issuer exists), included in the `helm lint --strict` set.
+- Tests: static suite grew from 54 to 62 assertions (Ingress TLS on/off, database
+  gate present/absent, bootstrap and provision Job-name stability and rotation,
+  PVC annotations).
+
 ## 0.2.2
 
 - Safe-by-default Job retention: `jobRetentionSeconds` now defaults to `0`,

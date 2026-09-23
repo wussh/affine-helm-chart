@@ -18,11 +18,17 @@ Checks:
   --job-ttl-absent        no rendered Job has a ttlSecondsAfterFinished field
   --job-ttl-equals N      every rendered Job has ttlSecondsAfterFinished == N
   --extra-envfrom NAME    the affine container has an envFrom entry for NAME
+  --ingress-tls-secret N  the Ingress serves TLS from Secret N and keeps ssl-redirect=true
+  --ingress-no-tls        the Ingress renders no spec.tls and forces ssl-redirect=false
+  --gate-present          the argocd.databaseGate PreSync hook Job and its RBAC are rendered
+  --gate-absent           no database-gate Job or RBAC is rendered
+  --pvc-annotation K=V    a rendered claim carries annotation K with value V
   --databasecluster       a DatabaseCluster is rendered
   --no-databasecluster    no DatabaseCluster is rendered
   --dc-keep               DatabaseCluster carries helm.sh/resource-policy: keep
   --dc-no-keep            DatabaseCluster does not carry helm.sh/resource-policy: keep
 """
+import re
 import sys
 
 try:
@@ -49,8 +55,13 @@ while i < len(args):
         flags.add(a)
         i += 2
         continue
-    if a in ("--job-ttl-equals", "--extra-envfrom"):
+    if a in ("--job-ttl-equals", "--extra-envfrom", "--pvc-annotation"):
         values.setdefault(a, []).append(args[i + 1])
+        flags.add(a)
+        i += 2
+        continue
+    if a == "--ingress-tls-secret":
+        values[a] = args[i + 1]
         flags.add(a)
         i += 2
         continue
@@ -248,6 +259,125 @@ if "--no-bootstrap" in flags:
                     {"patch", "update"} & set(rule.get("verbs") or []):
                 fail(f"no bootstrap Job expected, but Role/{role['metadata']['name']} can write Secrets")
 
+def application_database_secret_name():
+    # The application Secret name is the one every workload reads DATABASE_URL
+    # from, so the gate's RBAC scope can be checked against the real target.
+    for _d, spec in pod_specs():
+        for c in containers_of(spec):
+            for e in c.get("env") or []:
+                ref = (e.get("valueFrom") or {}).get("secretKeyRef") or {}
+                if e.get("name") == "DATABASE_URL" and ref.get("name"):
+                    return ref["name"]
+    return None
+
+
+if "--gate-present" in flags:
+    # argocd.databaseGate.enabled=true: an Argo CD PreSync hook Job waits for the
+    # database endpoint before the application and migration waves run.
+    #
+    # The hook must be self-contained: PreSync runs before the Sync phase, so a
+    # chart-rendered ServiceAccount/Role/RoleBinding would not exist yet on the
+    # first sync. DATABASE_URL arrives through secretKeyRef, the pod mounts no
+    # API token, and the script uses no kubectl and no RBAC.
+    gates = [j for j in by_kind("Job") if j["metadata"]["name"].endswith("-db-gate")]
+    if len(gates) != 1:
+        fail(f"expected exactly one database-gate Job, found {[j['metadata']['name'] for j in gates]}")
+    else:
+        gate = gates[0]
+        gname = gate["metadata"]["name"]
+        ann = gate.get("metadata", {}).get("annotations") or {}
+        if ann.get("argocd.argoproj.io/hook") != "PreSync":
+            fail(f"Job/{gname} is not an Argo CD PreSync hook "
+                 f"(hook={ann.get('argocd.argoproj.io/hook')!r})")
+        if ann.get("argocd.argoproj.io/hook-delete-policy") != "BeforeHookCreation":
+            fail(f"Job/{gname} hook-delete-policy="
+                 f"{ann.get('argocd.argoproj.io/hook-delete-policy')!r}, "
+                 "expected 'BeforeHookCreation'")
+        spec = gate["spec"]["template"]["spec"]
+        if spec.get("serviceAccountName"):
+            fail(f"Job/{gname} sets serviceAccountName="
+                 f"{spec.get('serviceAccountName')!r}; a PreSync hook must not depend on a "
+                 "chart-rendered ServiceAccount that does not exist yet")
+        if spec.get("automountServiceAccountToken") is not False:
+            fail(f"Job/{gname} must set automountServiceAccountToken: false "
+                 f"(got {spec.get('automountServiceAccountToken')!r})")
+
+        containers = spec.get("containers") or []
+        if len(containers) != 1:
+            fail(f"Job/{gname} must run exactly one container, found "
+                 f"{[c.get('name') for c in containers]}")
+        scripts = []
+        for c in containers:
+            scripts.extend(c.get("args") or [])
+            scripts.extend(c.get("command") or [])
+        script = "\n".join(scripts)
+        if "DATABASE_URL" not in script:
+            fail(f"Job/{gname} script does not read DATABASE_URL")
+        if "nc -z" not in script:
+            fail(f"Job/{gname} script does not probe the endpoint with nc -z")
+        if "cat " in script:
+            fail(f"Job/{gname} script prints a Secret value via cat")
+        if "kubectl" in script:
+            fail(f"Job/{gname} script calls kubectl; a PreSync hook has no RBAC and must "
+                 "read DATABASE_URL from the environment")
+        if "nc -z -w" not in script:
+            fail(f"Job/{gname} script must bound every probe with `nc -z -w <interval>`; "
+                 "an unroutable host would otherwise hang until the Job deadline")
+        if "date +%s" not in script:
+            fail(f"Job/{gname} script must derive its deadline from the wall clock "
+                 "(`date +%s`), not from a loop counter: one iteration costs up to "
+                 "nc-timeout + sleep, so a counter under-counts and the Job is killed "
+                 "before it can report the timeout")
+        timeout_match = re.search(r"^TIMEOUT=(\d+)$", script, re.M)
+        interval_match = re.search(r"^INTERVAL=(\d+)$", script, re.M)
+        if timeout_match is None or interval_match is None:
+            fail(f"Job/{gname} script does not define TIMEOUT and INTERVAL")
+        else:
+            probe_timeout = int(timeout_match.group(1))
+            interval = int(interval_match.group(1))
+            deadline = gate["spec"].get("activeDeadlineSeconds")
+            required = probe_timeout + 2 * interval + 30
+            if not isinstance(deadline, int):
+                fail(f"Job/{gname} has no activeDeadlineSeconds")
+            elif deadline < required:
+                fail(f"Job/{gname} activeDeadlineSeconds={deadline} must be at least "
+                     f"timeout + 2*interval + 30 = {required}s: one iteration costs up to "
+                     "nc -w + sleep, so a probe that starts near the timeout would otherwise "
+                     "be killed before the script reports it")
+        env = containers[0].get("env") or []
+        url_env = next((e for e in env if e.get("name") == "DATABASE_URL"), None)
+        if url_env is None:
+            fail(f"Job/{gname} does not inject DATABASE_URL into the container")
+        else:
+            ref = ((url_env.get("valueFrom") or {}).get("secretKeyRef") or {})
+            if ref.get("key") != "DATABASE_URL":
+                fail(f"Job/{gname} injects DATABASE_URL from secretKeyRef key "
+                     f"{ref.get('key')!r}, expected 'DATABASE_URL'")
+            app_secret = application_database_secret_name()
+            if app_secret is None:
+                fail("no rendered workload reads DATABASE_URL from a Secret; "
+                     f"cannot verify the Secret scope of Job/{gname}")
+            elif ref.get("name") != app_secret:
+                fail(f"Job/{gname} reads secretKeyRef name={ref.get('name')!r}, "
+                     f"but the workloads read {app_secret!r}")
+
+        # The gate must not render RBAC objects at all: they are Sync-phase
+        # resources and would not exist when the PreSync hook runs.
+        for kind in ("ServiceAccount", "Role", "RoleBinding"):
+            for d in by_kind(kind):
+                if d["metadata"]["name"].endswith("-db-gate"):
+                    fail(f"{kind}/{d['metadata']['name']} is rendered for the database gate; "
+                         "a PreSync hook must be self-contained (secretKeyRef + no API token)")
+
+if "--gate-absent" in flags:
+    # argocd.databaseGate.enabled=false (the default): no gate object at all,
+    # otherwise `helm install` and non-Argo CD upgrades carry a stray PreSync Job.
+    for kind in ("Job", "ServiceAccount", "Role", "RoleBinding"):
+        for d in by_kind(kind):
+            if d["metadata"]["name"].endswith("-db-gate"):
+                fail(f"unexpected {kind}/{d['metadata']['name']} rendered with the "
+                     "database gate disabled")
+
 if "--job-ttl" in flags:
     # Every rendered Job must bound its own history, or repeated upgrades
     # accumulate one Job per checksum revision forever.
@@ -276,6 +406,45 @@ if "--job-ttl-equals" in flags:
         ttl = j["spec"].get("ttlSecondsAfterFinished")
         if ttl != want:
             fail(f"Job/{j['metadata']['name']} has ttlSecondsAfterFinished={ttl!r}, expected {want}")
+
+if "--ingress-tls-secret" in flags:
+    # tls.enabled=true must serve TLS from the configured Secret and keep the
+    # default ssl-redirect=true annotation, so the host is not plaintext.
+    ings = by_kind("Ingress")
+    if len(ings) != 1:
+        fail(f"expected exactly one Ingress, found {len(ings)}")
+    else:
+        ing = ings[0]
+        want = values["--ingress-tls-secret"]
+        tls = ing["spec"].get("tls")
+        if not tls:
+            fail(f"Ingress/{ing['metadata']['name']} renders no spec.tls (expected secretName {want!r})")
+        elif tls[0].get("secretName") != want:
+            fail(f"Ingress/{ing['metadata']['name']} spec.tls[0].secretName="
+                 f"{tls[0].get('secretName')!r}, expected {want!r}")
+        got = (ing.get("metadata", {}).get("annotations") or {}).get(
+            "nginx.ingress.kubernetes.io/ssl-redirect")
+        if got != "true":
+            fail(f"Ingress/{ing['metadata']['name']} ssl-redirect={got!r}, expected 'true'")
+
+if "--ingress-no-tls" in flags:
+    # tls.enabled=false must render no spec.tls at all (otherwise nginx still
+    # expects a certificate) and force ssl-redirect=false while keeping the
+    # other default annotations.
+    ings = by_kind("Ingress")
+    if len(ings) != 1:
+        fail(f"expected exactly one Ingress, found {len(ings)}")
+    else:
+        ing = ings[0]
+        ann = ing.get("metadata", {}).get("annotations") or {}
+        if "tls" in ing["spec"]:
+            fail(f"Ingress/{ing['metadata']['name']} renders spec.tls with tls.enabled=false")
+        got = ann.get("nginx.ingress.kubernetes.io/ssl-redirect")
+        if got != "false":
+            fail(f"Ingress/{ing['metadata']['name']} ssl-redirect={got!r}, expected 'false'")
+        if "nginx.ingress.kubernetes.io/proxy-body-size" not in ann:
+            fail(f"Ingress/{ing['metadata']['name']} dropped the default annotations "
+                 "with tls.enabled=false")
 
 if "--extra-envfrom" in flags:
     # The extension point must reach the application container: an envFrom that
@@ -354,6 +523,26 @@ if "--no-pvc-substr" in flags:
                 fail(f"unexpected PVC/{d['metadata']['name']} rendered")
 if "--no-pvc" in flags and by_kind("PersistentVolumeClaim"):
     fail("no PVC objects were expected, but some were rendered")
+if "--pvc-annotation" in flags:
+    # Extra claim annotations (for example a Velero/Kasten selector) either land
+    # on a rendered claim or the backup tooling silently ignores the volume.
+    claims = by_kind("PersistentVolumeClaim")
+    if not claims:
+        fail("no PersistentVolumeClaim rendered to check annotations")
+    for entry in values["--pvc-annotation"]:
+        if "=" not in entry:
+            fail(f"--pvc-annotation expects KEY=VALUE, got {entry!r}")
+            continue
+        key, want = entry.split("=", 1)
+        carried = [c for c in claims
+                   if key in (c.get("metadata", {}).get("annotations") or {})]
+        if not carried:
+            fail(f"no rendered claim carries annotation {key} "
+                 f"(claims: {sorted(c['metadata']['name'] for c in claims)})")
+        elif not any(c["metadata"]["annotations"][key] == want for c in carried):
+            fail(f"annotation {key} is "
+                 f"{sorted(c['metadata']['annotations'][key] for c in carried)!r}, "
+                 f"expected {want!r}")
 
 dcs = by_kind("DatabaseCluster")
 if "--databasecluster" in flags and not dcs:

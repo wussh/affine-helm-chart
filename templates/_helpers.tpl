@@ -165,12 +165,194 @@ false
 {{- end }}
 
 {{- define "affine.databaseProvisioningChecksum" -}}
-{{- toJson (dict "image" .Values.prerequisites.database.container.image "provisioning" .Values.databaseProvisioning "adminSecret" (include "affine.databaseAdminSecretName" .) "applicationSecret" (include "affine.databaseApplicationSecretName" .)) | sha256sum | trunc 8 -}}
-{{- end }}
+{{- include "affine.databaseProvisioningPodTemplate" . | sha256sum | trunc 8 -}}
+{{- end -}}
 
 {{- define "affine.databaseProvisioningJobName" -}}
 {{ include "affine.fullname" . }}-database-provision-{{ include "affine.databaseProvisioningChecksum" . }}
+{{- end -}}
+
+{{/*
+Effective database-provision pod template, rendered identically by the Job and
+by the checksum probe, so the Job name covers every immutable pod-template input
+(image, security context, service account, Secret names, wait timings, labels).
+*/}}
+{{- define "affine.databaseProvisioningPodTemplate" -}}
+{{- $img := .Values.databaseProvisioning.image }}
+{{- $bootstrapImage := printf "%s:%s" $img.repository $img.tag }}
+{{- if $img.digest }}
+{{- $bootstrapImage = printf "%s@%s" $img.repository $img.digest }}
 {{- end }}
+{{- $jobSecurityContext := deepCopy .Values.securityContext }}
+{{- $_ := set $jobSecurityContext "readOnlyRootFilesystem" true }}
+{{- $_ := set $jobSecurityContext "runAsNonRoot" true }}
+{{- $_ := set $jobSecurityContext "runAsUser" 10001 }}
+{{- $_ := set $jobSecurityContext "runAsGroup" 101 }}
+metadata:
+  labels: {{- include "affine.labels" . | nindent 4 }}
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "affine.fullname" . }}-bootstrap
+  automountServiceAccountToken: true
+  securityContext:
+    fsGroup: 101
+  initContainers:
+    - name: wait-and-load-secrets
+      image: {{ $bootstrapImage }}
+      imagePullPolicy: {{ $img.pullPolicy }}
+      command: ["/scripts/wait-and-load-secrets.sh"]
+      env:
+        - name: ADMIN_SECRET_NAMESPACE
+          value: {{ include "affine.prerequisiteDatabaseNamespace" . | quote }}
+        - name: ADMIN_SECRET_NAME
+          value: {{ include "affine.databaseAdminSecretName" . | quote }}
+        - name: ADMIN_HOST_KEY
+          value: {{ .Values.databaseProvisioning.admin.hostKey | quote }}
+        - name: ADMIN_PORT_KEY
+          value: {{ .Values.databaseProvisioning.admin.portKey | quote }}
+        - name: ADMIN_USERNAME_KEY
+          value: {{ .Values.databaseProvisioning.admin.usernameKey | quote }}
+        - name: ADMIN_PASSWORD_KEY
+          value: {{ .Values.databaseProvisioning.admin.passwordKey | quote }}
+        - name: APP_SECRET_NAMESPACE
+          value: {{ include "affine.databaseSecretNamespace" . | quote }}
+        - name: APP_SECRET_NAME
+          value: {{ include "affine.databaseApplicationSecretName" . | quote }}
+        - name: APP_USERNAME_KEY
+          value: {{ .Values.databaseProvisioning.application.usernameKey | quote }}
+        - name: APP_PASSWORD_KEY
+          value: {{ .Values.databaseProvisioning.application.passwordKey | quote }}
+        - name: WAIT_INTERVAL_SECONDS
+          value: {{ .Values.databaseProvisioning.waitIntervalSeconds | quote }}
+        - name: WAIT_TIMEOUT_SECONDS
+          value: {{ .Values.databaseProvisioning.waitTimeoutSeconds | quote }}
+      securityContext: {{- toYaml $jobSecurityContext | nindent 8 }}
+      volumeMounts:
+        - name: secret-data
+          mountPath: /run/affine-secrets
+        - name: tmp
+          mountPath: /tmp
+  containers:
+    - name: provision-db
+      image: {{ $bootstrapImage }}
+      imagePullPolicy: {{ $img.pullPolicy }}
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          /scripts/wait-postgres.sh
+          /scripts/provision-db.sh
+      env:
+        - name: APP_DATABASE
+          value: {{ .Values.databaseProvisioning.database | quote }}
+        - name: WAIT_INTERVAL_SECONDS
+          value: {{ .Values.databaseProvisioning.waitIntervalSeconds | quote }}
+        - name: WAIT_TIMEOUT_SECONDS
+          value: {{ .Values.databaseProvisioning.waitTimeoutSeconds | quote }}
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 250m, memory: 256Mi}
+      securityContext: {{- toYaml $jobSecurityContext | nindent 8 }}
+      volumeMounts:
+        - name: secret-data
+          mountPath: /run/affine-secrets
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: secret-data
+      emptyDir:
+        medium: Memory
+    - name: tmp
+      emptyDir:
+        medium: Memory
+{{- end -}}
+
+{{/*
+Effective bootstrap pod template, rendered identically by the bootstrap Job and
+by the checksum probe. The body references the database-provision Job name (a
+plain string built from that Job's own checksum), so this hash cannot recurse.
+*/}}
+{{- define "affine.bootstrapPodTemplate" -}}
+metadata:
+  labels: {{- include "affine.labels" . | nindent 4 }}
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "affine.fullname" . }}-bootstrap
+  containers:
+    - name: bootstrap
+      image: {{ .Values.prerequisites.bootstrap.image }}
+      command: [sh, -ec]
+      args:
+        - |
+          {{- if .Values.databaseProvisioning.enabled }}
+          kubectl -n {{ .Release.Namespace }} wait --for=condition=complete --timeout={{ .Values.prerequisites.bootstrap.activeDeadlineSeconds }}s job/{{ include "affine.databaseProvisioningJobName" . }}
+          {{- end }}
+          {{- if eq .Values.prerequisites.database.mode "everest" }}
+          until [ "$(kubectl -n {{ include "affine.prerequisiteDatabaseNamespace" . }} get databasecluster {{ .Values.prerequisites.database.name }} -o jsonpath='{.status.status}')" = ready ]; do sleep 5; done
+          {{- else }}
+          HOST={{ .Values.prerequisites.database.name }}.{{ include "affine.prerequisiteDatabaseNamespace" . }}.svc
+          PORT=5432
+          {{- end }}
+          until kubectl -n {{ include "affine.prerequisiteDatabaseNamespace" . }} get secret {{ include "affine.databaseBootstrapSecretName" . }} >/dev/null 2>&1; do sleep 5; done
+          {{- if .Values.databaseProvisioning.enabled }}
+          APP_SECRET={{ include "affine.databaseApplicationSecretName" . }}
+          USER=$(kubectl -n {{ include "affine.databaseSecretNamespace" . }} get secret "$APP_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.application.usernameKey }}}' | base64 -d)
+          PASSWORD=$(kubectl -n {{ include "affine.databaseSecretNamespace" . }} get secret "$APP_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.application.passwordKey }}}' | base64 -d)
+          DB_NAME={{ .Values.databaseProvisioning.database | quote }}
+          {{- else }}
+          ADMIN_SECRET={{ include "affine.databaseAdminSecretName" . }}
+          USER=$(kubectl -n {{ include "affine.prerequisiteDatabaseNamespace" . }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.usernameKey }}}' | base64 -d)
+          PASSWORD=$(kubectl -n {{ include "affine.prerequisiteDatabaseNamespace" . }} get secret "$ADMIN_SECRET" -o jsonpath='{.data.{{ .Values.databaseProvisioning.admin.passwordKey }}}' | base64 -d)
+          DB_NAME={{ .Values.prerequisites.database.container.database | quote }}
+          {{- end }}
+          {{- if eq .Values.prerequisites.database.mode "everest" }}
+          ADMIN_SECRET={{ include "affine.databaseAdminSecretName" . }}
+          HOST=$(kubectl -n {{ include "affine.prerequisiteDatabaseNamespace" . }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.hostKey }}']}" | base64 -d)
+          PORT=$(kubectl -n {{ include "affine.prerequisiteDatabaseNamespace" . }} get secret "$ADMIN_SECRET" -o jsonpath="{.data['{{ .Values.databaseProvisioning.admin.portKey }}']}" | base64 -d)
+          {{- end }}
+          until nc -z "$HOST" "$PORT"; do sleep 5; done
+          {{- if .Values.prerequisites.redis.enabled }}
+          until nc -z {{ .Values.prerequisites.redis.name }}.{{ .Release.Namespace }}.svc 6379; do sleep 5; done
+          {{- end }}
+          ENCODED_USER=$(printf %s "$USER" | od -An -tx1 | tr -d ' \n' | sed 's/../%&/g')
+          ENCODED_PASSWORD=$(printf %s "$PASSWORD" | od -An -tx1 | tr -d ' \n' | sed 's/../%&/g')
+          PATCH_FILE=/tmp/affine-database-patch.json
+          trap 'rm -f /tmp/DATABASE_URL "$PATCH_FILE"' EXIT
+          umask 077
+          printf %s "postgresql://${ENCODED_USER}:${ENCODED_PASSWORD}@${HOST}:${PORT}/${DB_NAME}" > /tmp/DATABASE_URL
+          SECRET_NS={{ include "affine.databaseSecretNamespace" . }}
+          APP_SECRET={{ include "affine.databaseApplicationSecretName" . }}
+          INTERVAL={{ .Values.databaseProvisioning.waitIntervalSeconds }}
+          TIMEOUT={{ .Values.databaseProvisioning.waitTimeoutSeconds }}
+          _elapsed=0
+          until kubectl -n "$SECRET_NS" get secret "$APP_SECRET" >/dev/null 2>&1; do
+            if [ "$_elapsed" -ge "$TIMEOUT" ]; then
+              echo "[ERROR] Timeout (${TIMEOUT}s) waiting for Secret ${SECRET_NS}/${APP_SECRET} to exist; set secrets.mode=create or create it externally before install" >&2
+              exit 1
+            fi
+            sleep "$INTERVAL"
+            _elapsed=$((_elapsed + INTERVAL))
+          done
+          B64="$(base64 < /tmp/DATABASE_URL | tr -d '\n')"
+          printf '{"data":{"DATABASE_URL":"%s"}}' "$B64" > "$PATCH_FILE"
+          kubectl -n "$SECRET_NS" patch secret "$APP_SECRET" --type=merge --patch-file "$PATCH_FILE" >/dev/null
+          kubectl -n "$SECRET_NS" patch secret "$APP_SECRET" --type=merge -p '{"metadata":{"annotations":{"kubectl.kubernetes.io/last-applied-configuration":null}}}' >/dev/null
+          LOCAL_HASH="$(sha256sum < /tmp/DATABASE_URL | awk '{print $1}')"
+          REMOTE_HASH="$(kubectl -n "$SECRET_NS" get secret "$APP_SECRET" -o jsonpath="{.data['DATABASE_URL']}" | base64 -d | sha256sum | awk '{print $1}')"
+          [ "$LOCAL_HASH" = "$REMOTE_HASH" ] || { echo "[ERROR] DATABASE_URL verification failed for Secret ${SECRET_NS}/${APP_SECRET}" >&2; exit 1; }
+          echo "[INFO] DATABASE_URL updated in Secret ${SECRET_NS}/${APP_SECRET} (value not printed)."
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 250m, memory: 256Mi}
+      securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
+{{- end -}}
+
+{{/* Hash of the rendered bootstrap pod template: a pod-template change rotates
+     the Job name instead of failing as an immutable Job update. */}}
+{{- define "affine.bootstrapChecksum" -}}
+{{- include "affine.bootstrapPodTemplate" . | sha256sum | trunc 8 -}}
+{{- end -}}
 
 {{/*
 Effective migration pod template, rendered identically by the migration Job and
@@ -370,6 +552,14 @@ always runs, including with default values.
 {{- end -}}
 {{- if gt (int .Values.replicaCount) 1 -}}
 {{- fail (printf "replicaCount=%d is not supported: AFFiNE stores data on ReadWriteOnce claims (persistence.storage/config) and has no multi-replica coordination. Set replicaCount=1." (int .Values.replicaCount)) -}}
+{{- end -}}
+{{- if .Values.argocd.databaseGate.enabled -}}
+  {{- if ne .Values.secrets.mode "existing" -}}
+    {{- fail "argocd.databaseGate.enabled=true requires secrets.mode=existing: the gate reads DATABASE_URL from the external Secret, which a chart-managed release only publishes after the bootstrap Job has run." -}}
+  {{- end -}}
+  {{- if .Values.databaseProvisioning.enabled -}}
+    {{- fail "argocd.databaseGate.enabled=true requires databaseProvisioning.enabled=false: with chart-managed provisioning DATABASE_URL does not exist until the bootstrap Job runs, so the gate would fail before it." -}}
+  {{- end -}}
 {{- end -}}
 {{- if .Values.databaseProvisioning.enabled -}}
   {{- if not (or .Values.application.enabled .Values.migration.enabled) -}}

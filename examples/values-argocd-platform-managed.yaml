@@ -1,0 +1,73 @@
+# Argo CD + Profile A (platform-owned PostgreSQL and Redis).
+#
+# Pairs with a platform GitOps surface that owns the namespace, the Everest
+# DatabaseCluster and Redis, and the namespace-local Secrets (for example
+# manifests/affine/ in the deployment repository). The release consumes their
+# Secrets read-only and renders no bootstrap Job.
+#
+# The chart's default values deploy nothing, so the application and the
+# migration Job must be enabled explicitly here.
+application:
+  enabled: true
+migration:
+  enabled: true
+
+# GitOps specifics:
+#   * jobRetentionSeconds: 0 keeps completed Jobs, so an unchanged sync never
+#     recreates the migration Job and never re-runs the migration.
+#   * argocd.databaseGate.enabled: true renders a PreSync hook Job that waits for
+#     the database endpoint, because Argo CD treats unknown CRs (an Everest
+#     DatabaseCluster) as Healthy on creation.
+#   * routing.mode stays "none" until a working certificate source exists:
+#     switching to "ingress" with routing.ingress.tls.enabled=true requires a
+#     functioning ClusterIssuer, otherwise the host is HTTPS-only and unusable.
+jobRetentionSeconds: 0
+
+argocd:
+  databaseGate:
+    enabled: true
+    timeoutSeconds: 900
+
+routing:
+  mode: none
+  host: affine.dev.tbs.cloudeka.xyz
+
+secrets:
+  mode: existing
+  database:
+    name: affine-database
+  redis:
+    name: affine-redis
+
+prerequisites:
+  enabled: false
+  database:
+    mode: external
+  redis:
+    enabled: false
+
+databaseProvisioning:
+  enabled: false
+
+image:
+  repository: ghcr.io/toeverything/affine
+  tag: "0.27.4"
+  digest: sha256:b649f5ce2384ffdf13c23bccf81d759e15973d59d0b0058af65d895a84373099
+
+persistence:
+  storage:
+    create: true
+    existingClaim: ""
+    retain: true
+    size: 20Gi
+    storageClass: storage-nvme-c1
+  config:
+    create: true
+    existingClaim: ""
+    retain: true
+    size: 1Gi
+    storageClass: storage-nvme-c1
+
+config:
+  serverName: AFFiNE Internal
+  externalUrl: https://affine.dev.tbs.cloudeka.xyz

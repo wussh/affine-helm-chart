@@ -76,6 +76,7 @@ expect_ok "lint everest existing fixture" helm lint --strict "$CHART" -f "$FIX/v
 expect_ok "lint everest create fixture" helm lint --strict "$CHART" -f "$FIX/values-everest-create.yaml"
 expect_ok "lint existing-pvc fixture" helm lint --strict "$CHART" -f "$FIX/values-existing-pvc.yaml"
 expect_ok "lint: platform-managed example" helm lint "$CHART" -f "$CHART/examples/values-platform-managed.yaml" --strict
+expect_ok "lint: argocd platform-managed example" helm lint "$CHART" -f "$CHART/examples/values-argocd-platform-managed.yaml" --strict
 
 echo "# static: default values render nothing (safe, intentionally incomplete)"
 if [ -n "$(helm template affine-default "$CHART" -n affine-tests 2>"$TMP/err")" ]; then
@@ -88,13 +89,21 @@ echo "# static: rendered manifests"
 render affine-dev "$CHART" -n affine-dev -f "$DEV" &&
   assert_render "dev: waits, secrets, PVCs, labels, selectors" \
     --release affine-dev --workloads --bootstrap --secrets --no-databasecluster \
-    --selector-compat --job-ttl-absent \
+    --selector-compat --job-ttl-absent --gate-absent \
     --pvc-names affine-dev-storage,affine-dev-config,affine-redis,affine-postgres-data
+
+# The chart's default values deploy nothing; a profile that forgets to enable
+# the application and migration would sync an empty Application in Argo CD.
+render affine-argocd "$CHART" -n affine-argocd -f "$CHART/examples/values-argocd-platform-managed.yaml" &&
+  assert_render "argocd profile: application and migration are enabled" \
+    --release affine-argocd --workloads --gate-present --job-ttl-absent \
+    --no-databasecluster \
+    --pvc-names affine-argocd-storage,affine-argocd-config
 
 render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" &&
   assert_render "existing mode: no Secrets rendered, no Secret writes, DatabaseCluster kept" \
     --release affine-tests --workloads --no-bootstrap --no-secrets --readonly-secret \
-    --databasecluster --dc-keep \
+    --databasecluster --dc-keep --gate-absent \
     --pvc-names affine-tests-storage,affine-tests-config,affine-redis
 
 render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-delete.yaml" &&
@@ -113,6 +122,38 @@ render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.ya
     --set prerequisites.database.existing=true &&
   assert_render "existing=true reuses retained DatabaseCluster (none rendered)" \
     --release affine-tests --no-databasecluster --no-bootstrap
+
+echo "# static: ingress TLS"
+# tls.enabled=true (default) serves TLS from tlsSecretName and keeps the default
+# ssl-redirect=true annotation. tls.enabled=false renders no spec.tls at all and
+# forces ssl-redirect=false while preserving the other annotations, so a cluster
+# without a working certificate source can still reach the host over plain HTTP.
+render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" \
+    --set routing.mode=ingress &&
+  assert_render "ingress: TLS enabled by default uses tlsSecretName" \
+    --release affine-tests --ingress-tls-secret affine-tls
+render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" \
+    --set routing.mode=ingress --set routing.ingress.tls.enabled=false &&
+  assert_render "ingress: TLS disabled renders no spec.tls and forces ssl-redirect=false" \
+    --release affine-tests --ingress-no-tls
+
+echo "# static: claim annotations"
+# persistence.*.annotations land on the chart-rendered claims; a dropped
+# annotation would silently break backup tooling (Velero/Kasten selectors).
+render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" \
+    --set persistence.storage.annotations."example\.com/x"=y &&
+  assert_render "PVC annotations: persistence.storage.annotations reach the claim" \
+    --release affine-tests --pvc-annotation example.com/x=y
+
+echo "# static: argocd database gate"
+# argocd.databaseGate.enabled is opt-in because `helm install` ignores
+# argocd.argoproj.io/* annotations. When enabled it must render the PreSync hook
+# Job plus exactly the read access that Job needs on the single application
+# Secret, and when disabled it must render none of those objects.
+render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" \
+    --set argocd.databaseGate.enabled=true &&
+  assert_render "gate enabled: PreSync hook Job with get-only Secret RBAC" \
+    --release affine-tests --gate-present
 
 echo "# static: job retention semantics"
 # jobRetentionSeconds=0 (default) renders no ttlSecondsAfterFinished field, so a
@@ -207,6 +248,45 @@ then
   ok "migration marker version matches the Deployment wait-migration expectation"
 else
   bad "migration marker version does not match the Deployment wait-migration expectation"
+fi
+
+echo "# static: bootstrap/provision/migration Job name rotation"
+# The bootstrap and provision Job names hash their rendered pod template (like
+# the migration Job already does), so a pod-template change rotates only the Job
+# that carries it instead of failing the update with "field is immutable", and a
+# routing/config-only change rotates none of them. The anchored 8-hex suffix
+# keeps the bootstrap RBAC objects (Role/<release>-bootstrap-source) out of the
+# match.
+job_names() { # release helm template args... (release is also helm's first argument)
+  local release="$1"
+  helm template "$@" 2>/dev/null |
+    grep -E "^  name: ${release}-(bootstrap|database-provision|migration)-[0-9a-z.-]*[0-9a-f]{8}$" |
+    sed 's/^  name: //'
+}
+job_named() { # pattern release helm template args...
+  local pattern="$1"; shift
+  job_names "$@" | grep -E -- "$pattern" | head -n 1
+}
+JOB_BASE=(affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-create.yaml")
+base_jobs="$(job_names "${JOB_BASE[@]}")"
+if [ "$(printf '%s\n' "$base_jobs" | grep -c .)" -eq 3 ] &&
+   [ "$base_jobs" = "$(job_names "${JOB_BASE[@]}")" ]; then
+  ok "bootstrap/provision/migration Job names are deterministic across identical renders"
+else
+  bad "bootstrap/provision/migration Job names are not deterministic"
+fi
+base_bootstrap="$(job_named '-bootstrap-' "${JOB_BASE[@]}")"
+rotated_bootstrap="$(job_named '-bootstrap-' "${JOB_BASE[@]}" --set securityContext.runAsNonRoot=false)"
+if [ -n "$rotated_bootstrap" ] && [ "$rotated_bootstrap" != "$base_bootstrap" ]; then
+  ok "bootstrap Job name changes for --set securityContext.runAsNonRoot=false"
+else
+  bad "bootstrap Job name did not change for --set securityContext.runAsNonRoot=false"
+fi
+routed_jobs="$(job_names "${JOB_BASE[@]}" --set routing.host=other.example.com)"
+if [ -n "$routed_jobs" ] && [ "$routed_jobs" = "$base_jobs" ]; then
+  ok "bootstrap/provision/migration Job names unchanged for --set routing.host=other.example.com"
+else
+  bad "Job names changed for routing-only --set routing.host=other.example.com"
 fi
 
 echo "# static: 0.2.0 -> 0.2.1 selector compatibility"
@@ -324,6 +404,9 @@ render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.ya
     --release affine-tests --extra-envfrom affine-extra-config
 expect_fail_msg "reject malformed extraEnvFrom entry" "extraEnvFrom" \
   helm template t "$CHART" -f "$DEV" --set extraEnvFrom[0].bogus=1
+expect_fail_msg "reject database gate interval above the schema cap" "intervalSeconds" \
+  helm template t "$CHART" -f "$CHART/examples/values-argocd-platform-managed.yaml" \
+    --set argocd.databaseGate.intervalSeconds=61
 
 echo "# static: credential hygiene"
 if grep -RInE 'postgresql://[^<[:space:]]+:[^<[:space:]]+@' \
