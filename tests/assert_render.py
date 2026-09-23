@@ -273,8 +273,12 @@ def application_database_secret_name():
 
 if "--gate-present" in flags:
     # argocd.databaseGate.enabled=true: an Argo CD PreSync hook Job waits for the
-    # database endpoint before the application and migration waves run, using
-    # read access to the single application Secret (get only).
+    # database endpoint before the application and migration waves run.
+    #
+    # The hook must be self-contained: PreSync runs before the Sync phase, so a
+    # chart-rendered ServiceAccount/Role/RoleBinding would not exist yet on the
+    # first sync. DATABASE_URL arrives through secretKeyRef, the pod mounts no
+    # API token, and the script uses no kubectl and no RBAC.
     gates = [j for j in by_kind("Job") if j["metadata"]["name"].endswith("-db-gate")]
     if len(gates) != 1:
         fail(f"expected exactly one database-gate Job, found {[j['metadata']['name'] for j in gates]}")
@@ -290,11 +294,13 @@ if "--gate-present" in flags:
                  f"{ann.get('argocd.argoproj.io/hook-delete-policy')!r}, "
                  "expected 'BeforeHookCreation'")
         spec = gate["spec"]["template"]["spec"]
-        if spec.get("serviceAccountName") != gname:
-            fail(f"Job/{gname} serviceAccountName={spec.get('serviceAccountName')!r}, "
-                 f"expected the gate's own ServiceAccount/{gname}")
-        if named("ServiceAccount", gname) is None:
-            fail(f"Job/{gname} has no matching ServiceAccount/{gname}")
+        if spec.get("serviceAccountName"):
+            fail(f"Job/{gname} sets serviceAccountName="
+                 f"{spec.get('serviceAccountName')!r}; a PreSync hook must not depend on a "
+                 "chart-rendered ServiceAccount that does not exist yet")
+        if spec.get("automountServiceAccountToken") is not False:
+            fail(f"Job/{gname} must set automountServiceAccountToken: false "
+                 f"(got {spec.get('automountServiceAccountToken')!r})")
 
         containers = spec.get("containers") or []
         if len(containers) != 1:
@@ -311,65 +317,53 @@ if "--gate-present" in flags:
             fail(f"Job/{gname} script does not probe the endpoint with nc -z")
         if "cat " in script:
             fail(f"Job/{gname} script prints a Secret value via cat")
-        ns_match = re.search(r"^SECRET_NS=(\S+)$", script, re.M)
-        name_match = re.search(r"^SECRET_NAME=(\S+)$", script, re.M)
-        if not ns_match:
-            fail(f"Job/{gname} script does not name the Secret namespace it reads")
-        if not name_match:
-            fail(f"Job/{gname} script does not name the Secret it reads")
-        secret_ns = ns_match.group(1) if ns_match else None
-        secret_name = name_match.group(1) if name_match else None
-        app_secret = application_database_secret_name()
-        if app_secret is None:
-            fail("no rendered workload reads DATABASE_URL from a Secret; "
-                 f"cannot verify the Secret scope of Job/{gname}")
-        elif secret_name and secret_name != app_secret:
-            fail(f"Job/{gname} reads SECRET_NAME={secret_name!r}, "
-                 f"but the workloads read {app_secret!r}")
-
-        roles = [r for r in by_kind("Role") if r["metadata"]["name"] == gname]
-        if len(roles) != 1:
-            fail(f"expected exactly one Role/{gname}, found {len(roles)}")
+        if "kubectl" in script:
+            fail(f"Job/{gname} script calls kubectl; a PreSync hook has no RBAC and must "
+                 "read DATABASE_URL from the environment")
+        if "nc -z -w" not in script:
+            fail(f"Job/{gname} script must bound every probe with `nc -z -w <interval>`; "
+                 "an unroutable host would otherwise hang until the Job deadline")
+        if "date +%s" not in script:
+            fail(f"Job/{gname} script must derive its deadline from the wall clock "
+                 "(`date +%s`), not from a loop counter: one iteration costs up to "
+                 "nc-timeout + sleep, so a counter under-counts and the Job is killed "
+                 "before it can report the timeout")
+        timeout_match = re.search(r"^TIMEOUT=(\d+)$", script, re.M)
+        if timeout_match is None:
+            fail(f"Job/{gname} script does not define TIMEOUT")
         else:
-            role = roles[0]
-            if secret_ns and role.get("metadata", {}).get("namespace") != secret_ns:
-                fail(f"Role/{gname} is in namespace "
-                     f"{role.get('metadata', {}).get('namespace')!r}, but the gate reads the "
-                     f"Secret from {secret_ns!r}")
-            rules = role.get("rules") or []
-            if len(rules) != 1:
-                fail(f"Role/{gname} must grant exactly one rule, found {len(rules)}")
-            for rule in rules:
-                if set(rule.get("verbs") or []) != {"get"}:
-                    fail(f"Role/{gname} grants verbs {rule.get('verbs')!r}; only get is allowed")
-                if set(rule.get("resources") or []) != {"secrets"}:
-                    fail(f"Role/{gname} grants on resources {rule.get('resources')!r}; "
-                         "only secrets is allowed")
-                names = rule.get("resourceNames") or []
-                if not names:
-                    fail(f"Role/{gname} has no resourceNames, so it can read every Secret")
-                elif app_secret and app_secret not in names:
-                    fail(f"Role/{gname} resourceNames={names} does not include the "
-                         f"application Secret {app_secret!r}")
-
-        bindings = [b for b in by_kind("RoleBinding") if b["metadata"]["name"] == gname]
-        if len(bindings) != 1:
-            fail(f"expected exactly one RoleBinding/{gname}, found {len(bindings)}")
+            probe_timeout = int(timeout_match.group(1))
+            deadline = gate["spec"].get("activeDeadlineSeconds")
+            if not isinstance(deadline, int):
+                fail(f"Job/{gname} has no activeDeadlineSeconds")
+            elif deadline <= probe_timeout:
+                fail(f"Job/{gname} activeDeadlineSeconds={deadline} must exceed the probe "
+                     f"timeout {probe_timeout}s, otherwise the Job is killed before it can "
+                     "report the timeout")
+        env = containers[0].get("env") or []
+        url_env = next((e for e in env if e.get("name") == "DATABASE_URL"), None)
+        if url_env is None:
+            fail(f"Job/{gname} does not inject DATABASE_URL into the container")
         else:
-            rb = bindings[0]
-            ref = rb.get("roleRef") or {}
-            if ref.get("kind") != "Role" or ref.get("name") != gname:
-                fail(f"RoleBinding/{gname} roleRef={ref!r} does not bind Role/{gname}")
-            subject = next((s for s in rb.get("subjects") or []
-                            if s.get("kind") == "ServiceAccount" and s.get("name") == gname), None)
-            if subject is None:
-                fail(f"RoleBinding/{gname} does not bind ServiceAccount/{gname}")
-            elif secret_ns and subject.get("namespace") != secret_ns:
-                fail(f"RoleBinding/{gname} binds ServiceAccount/{gname} in namespace "
-                     f"{subject.get('namespace')!r}, not {secret_ns!r}")
-            if secret_ns and rb.get("metadata", {}).get("namespace") != secret_ns:
-                fail(f"RoleBinding/{gname} is in namespace "
-                     f"{rb.get('metadata', {}).get('namespace')!r}, not {secret_ns!r}")
+            ref = ((url_env.get("valueFrom") or {}).get("secretKeyRef") or {})
+            if ref.get("key") != "DATABASE_URL":
+                fail(f"Job/{gname} injects DATABASE_URL from secretKeyRef key "
+                     f"{ref.get('key')!r}, expected 'DATABASE_URL'")
+            app_secret = application_database_secret_name()
+            if app_secret is None:
+                fail("no rendered workload reads DATABASE_URL from a Secret; "
+                     f"cannot verify the Secret scope of Job/{gname}")
+            elif ref.get("name") != app_secret:
+                fail(f"Job/{gname} reads secretKeyRef name={ref.get('name')!r}, "
+                     f"but the workloads read {app_secret!r}")
+
+        # The gate must not render RBAC objects at all: they are Sync-phase
+        # resources and would not exist when the PreSync hook runs.
+        for kind in ("ServiceAccount", "Role", "RoleBinding"):
+            for d in by_kind(kind):
+                if d["metadata"]["name"].endswith("-db-gate"):
+                    fail(f"{kind}/{d['metadata']['name']} is rendered for the database gate; "
+                         "a PreSync hook must be self-contained (secretKeyRef + no API token)")
 
 if "--gate-absent" in flags:
     # argocd.databaseGate.enabled=false (the default): no gate object at all,

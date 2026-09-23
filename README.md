@@ -137,8 +137,10 @@ The bootstrap script uses `kubectl patch --type=merge --patch-file` for `.data.D
   `nginx.ingress.kubernetes.io/ssl-redirect: "false"`, so a cluster without a
   certificate source keeps a working plain-HTTP host.
 * `argocd.databaseGate.enabled` (default `false`) renders a `PreSync` hook Job
-  that waits for the database endpoint before the application waves; the Role it
-  gets can only `get` the application Secret.
+  that waits for the database endpoint before the application waves. It injects
+  `DATABASE_URL` with `secretKeyRef`, mounts no API token and renders no
+  ServiceAccount/Role/RoleBinding of its own: PreSync runs before the Sync phase,
+  so chart-rendered RBAC would not exist yet on the first sync.
 * `persistence.storage.annotations` / `persistence.config.annotations` add
   annotations to the chart-rendered claims.
 * AFFiNE stores data on ReadWriteOnce claims, so exactly one replica is
@@ -290,7 +292,7 @@ Sync waves are implementation-level ordering hints, not cross-Application readin
 
 Argo CD reports unknown custom resources — an Everest `DatabaseCluster` — as `Healthy` as soon as they exist, so a sync wave never waits for `status.state: ready`. Two ways to close that gap:
 
-* `argocd.databaseGate.enabled=true` (see `examples/values-argocd-platform-managed.yaml`): renders a `PreSync` hook Job that reads `DATABASE_URL`, parses host and port and probes with `nc -z` until the database accepts connections. Its ServiceAccount may only `get` the application Secret. It requires `secrets.mode: existing` with `databaseProvisioning.enabled=false` (the value is published by the platform, not by a chart Job). `helm install` ignores `argocd.argoproj.io/*` annotations, so this is opt-in and off by default. Tune `argocd.databaseGate.timeoutSeconds` / `intervalSeconds`; the Job is recreated on each sync (`hook-delete-policy: BeforeHookCreation`) in wave `-1`, after any chart-rendered Secrets.
+* `argocd.databaseGate.enabled=true` (see `examples/values-argocd-platform-managed.yaml`): renders a `PreSync` hook Job that reads `DATABASE_URL` through `secretKeyRef`, parses host and port and probes with `nc -z` until the database accepts connections. It is deliberately self-contained — no ServiceAccount of its own, no RBAC, no kubectl, `automountServiceAccountToken: false` — because PreSync hooks run **before** the Sync phase, so a chart-rendered ServiceAccount/Role/RoleBinding would not exist yet on the first sync. It requires `secrets.mode: existing` with `databaseProvisioning.enabled=false` (the value is published by the platform, not by a chart Job). `helm install` ignores `argocd.argoproj.io/*` annotations, so this is opt-in and off by default. Tune `argocd.databaseGate.timeoutSeconds` / `intervalSeconds`; the Job is recreated on each sync (`hook-delete-policy: BeforeHookCreation`).
 * A platform-level health check in `argocd-cm` (Lua) for `everest.percona.com/DatabaseCluster` — see `docs/operations.md`.
 
 Enable the gate before the first sync, keep `prune` and `selfHeal` disabled, and prove on the target release that a second unchanged sync recreates nothing (no new Job, migration marker unchanged) before turning on automation.

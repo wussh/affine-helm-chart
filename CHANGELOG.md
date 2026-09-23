@@ -10,13 +10,16 @@
   `tlsSecretName` is required only when TLS is enabled (schema `if/then` plus a
   render-time guard).
 - Argo CD database gate: `argocd.databaseGate` renders an opt-in `PreSync` hook
-  Job (with a minimal ServiceAccount/Role/RoleBinding that may only `get` the
-  application Secret) which reads `DATABASE_URL`, parses host and port and
+  Job that injects `DATABASE_URL` with `secretKeyRef`, parses host and port and
   probes until the database accepts TCP connections. Argo CD treats unknown CRs
   — an Everest `DatabaseCluster` — as Healthy on creation, so sync waves
-  otherwise do not wait for `status.state: ready`. It requires
-  `secrets.mode: existing` with `databaseProvisioning.enabled=false`, and runs in
-  wave `-1` (after any chart-rendered Secrets). `helm install` ignores
+  otherwise do not wait for `status.state: ready`. The hook is self-contained on
+  purpose (no ServiceAccount, Role, RoleBinding, kubectl or API token): PreSync
+  runs before the Sync phase, so chart-rendered RBAC would not exist yet on the
+  first sync. It requires `secrets.mode: existing` with
+  `databaseProvisioning.enabled=false`. Every probe attempt is bounded
+  (`nc -z -w <intervalSeconds>`), so an unroutable host fails with the timeout
+  message instead of hanging until the Job deadline. `helm install` ignores
   `argocd.argoproj.io/*` annotations, hence the gate is off by default.
 - Bootstrap and database-provision Job names now hash their **rendered pod
   template** instead of a hand-picked value list, matching the migration Job

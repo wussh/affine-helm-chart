@@ -296,11 +296,13 @@ helm template affine-tests . -n affine-tests -f examples/values-dev.yaml \
 
 Pass: with the gate enabled exactly one `<release>-db-gate` Job renders, carrying
 `argocd.argoproj.io/hook: PreSync` and `hook-delete-policy: BeforeHookCreation`,
-with a ServiceAccount/Role/RoleBinding of the same name; the Role grants only
-`get` on the application Secret, and the container script probes with `nc -z`
-without printing any Secret value. Default values render no gate. Enabling the
-gate with `secrets.mode=create` or `databaseProvisioning.enabled=true` fails
-validation with an explicit message.
+with `automountServiceAccountToken: false`, `DATABASE_URL` injected through
+`secretKeyRef`, and no ServiceAccount/Role/RoleBinding/kubectl anywhere in the
+render — PreSync hooks run before the Sync phase, so chart-rendered RBAC would
+not exist yet on the first sync. The script probes with `nc -z` and prints no
+Secret value. Default values render no gate. Enabling the gate with
+`secrets.mode=create` or `databaseProvisioning.enabled=true` fails validation
+with an explicit message.
 
 ## TC-16: Job-name rotation and PVC annotations
 
