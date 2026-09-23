@@ -22,9 +22,12 @@ section of the same number (see the release section of `README.md`). `0.1.0` and
   runs before the Sync phase, so chart-rendered RBAC would not exist yet on the
   first sync. It requires `secrets.mode: existing` with
   `databaseProvisioning.enabled=false`. Every probe attempt is bounded
-  (`nc -z -w <intervalSeconds>`), so an unroutable host fails with the timeout
-  message instead of hanging until the Job deadline. `helm install` ignores
-  `argocd.argoproj.io/*` annotations, hence the gate is off by default.
+  (`nc -z -w <intervalSeconds>`), the deadline is measured from the wall clock
+  (`date +%s`) rather than from a loop counter, and `activeDeadlineSeconds` is
+  `timeoutSeconds + 2 × intervalSeconds + 30` with `intervalSeconds`
+  schema-capped at 60 — so an unreachable host always reports the timeout before
+  the Job is killed. `helm install` ignores `argocd.argoproj.io/*` annotations,
+  hence the gate is off by default.
 - Bootstrap and database-provision Job names now hash their **rendered pod
   template** instead of a hand-picked value list, matching the migration Job
   pattern. Upgrading from `0.2.2` rotates those two Job names **once**, which
@@ -34,11 +37,20 @@ section of the same number (see the release section of `README.md`). `0.1.0` and
   annotations for the chart-rendered claims (for example a Velero/Kasten
   selector). Ignored when `create=false`.
 - New `examples/values-argocd-platform-managed.yaml`: Profile A values for a
-  GitOps install (Job retention `0`, database gate enabled, `routing.mode: none`
-  until an issuer exists), included in the `helm lint --strict` set.
-- Tests: static suite grew from 54 to 62 assertions (Ingress TLS on/off, database
-  gate present/absent, bootstrap and provision Job-name stability and rotation,
-  PVC annotations).
+  GitOps install. It enables `application` and `migration` explicitly — the chart
+  defaults deploy nothing, and without them an Argo CD Application renders only
+  the PreSync hook and installs nothing — keeps Job retention at `0`, enables the
+  database gate and leaves `routing.mode: none` until an issuer exists. Included
+  in the `helm lint --strict` set, with a render guard asserting the profile
+  produces the Deployment, the migration Job and the gate hook.
+- Tests: static suite grew from 54 to 64 assertions (Ingress TLS on/off;
+  database gate present/absent, including no gate RBAC, `secretKeyRef` injection,
+  bounded probes, wall-clock deadline and `activeDeadlineSeconds ≥ timeout +
+  2 × interval + 30`; bootstrap/provision/migration Job-name stability and
+  rotation; PVC annotations; the Argo CD profile workload guard). A fresh install
+  through Argo CD was verified end-to-end on `tbs-dev` — PreSync gate first,
+  migration against a real database, `Synced`/`Healthy` — and a second unchanged
+  sync recreated nothing.
 
 ## 0.2.2
 
