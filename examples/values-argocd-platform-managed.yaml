@@ -5,6 +5,13 @@
 # manifests/affine/ in the deployment repository). The release consumes their
 # Secrets read-only and renders no bootstrap Job.
 #
+# The chart's default values deploy nothing, so the application and the
+# migration Job must be enabled explicitly here.
+application:
+  enabled: true
+migration:
+  enabled: true
+
 # GitOps specifics:
 #   * jobRetentionSeconds: 0 keeps completed Jobs, so an unchanged sync never
 #     recreates the migration Job and never re-runs the migration.

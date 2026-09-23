@@ -92,6 +92,14 @@ render affine-dev "$CHART" -n affine-dev -f "$DEV" &&
     --selector-compat --job-ttl-absent --gate-absent \
     --pvc-names affine-dev-storage,affine-dev-config,affine-redis,affine-postgres-data
 
+# The chart's default values deploy nothing; a profile that forgets to enable
+# the application and migration would sync an empty Application in Argo CD.
+render affine-argocd "$CHART" -n affine-argocd -f "$CHART/examples/values-argocd-platform-managed.yaml" &&
+  assert_render "argocd profile: application and migration are enabled" \
+    --release affine-argocd --workloads --gate-present --job-ttl-absent \
+    --no-databasecluster \
+    --pvc-names affine-argocd-storage,affine-argocd-config
+
 render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" &&
   assert_render "existing mode: no Secrets rendered, no Secret writes, DatabaseCluster kept" \
     --release affine-tests --workloads --no-bootstrap --no-secrets --readonly-secret \
