@@ -120,7 +120,7 @@ keep Argo CD self-heal and prune disabled for initial adoption.
 
 The bootstrap script uses `kubectl patch --type=merge --patch-file` for `.data.DATABASE_URL`, never `kubectl apply` or `create secret | apply`. It normally preserves unrelated Secret keys, writes temporary data with `umask 077`, and verifies the patched URL by SHA-256 without printing it. Its RBAC authority remains whole-object `patch`/`update`, and it may remove the legacy annotation described above.
 
-## Verified semantics (chart 0.2.2)
+## Verified semantics (chart 0.2.3)
 
 * `jobRetentionSeconds: 0` renders no `ttlSecondsAfterFinished` field and keeps
   completed Jobs (bootstrap, database-provision, migration).
@@ -128,6 +128,19 @@ The bootstrap script uses `kubectl patch --type=merge --patch-file` for `.data.D
   from the rendered migration pod template: any pod-template change rotates the
   name, and unrelated changes (routing, `config.*`, Service port, PVC size,
   application resources, probes) do not.
+* Bootstrap and database-provision Job names are
+  `<release>-bootstrap-<8-hex>` and `<release>-database-provision-<8-hex>`,
+  hashed from their rendered pod templates with the same rule. Upgrading from
+  `0.2.2` rotates both names once (see CHANGELOG).
+* `routing.ingress.tls.enabled` (default `true`) controls `spec.tls`; with
+  `false` the Ingress renders no TLS block and forces
+  `nginx.ingress.kubernetes.io/ssl-redirect: "false"`, so a cluster without a
+  certificate source keeps a working plain-HTTP host.
+* `argocd.databaseGate.enabled` (default `false`) renders a `PreSync` hook Job
+  that waits for the database endpoint before the application waves; the Role it
+  gets can only `get` the application Secret.
+* `persistence.storage.annotations` / `persistence.config.annotations` add
+  annotations to the chart-rendered claims.
 * AFFiNE stores data on ReadWriteOnce claims, so exactly one replica is
   supported. `replicaCount` is schema-pinned to `1`; a render that bypasses
   schema validation fails with an explicit `replicaCount=... is not supported:
@@ -138,7 +151,8 @@ The bootstrap script uses `kubectl patch --type=merge --patch-file` for `.data.D
   Redis Secret. `secrets.database.allowBootstrapPatch=true` is the single
   explicit exception.
 * Profile A (platform-owned PostgreSQL and Redis) uses
-  `examples/values-platform-managed.yaml`: `prerequisites.enabled=false`,
+  `examples/values-platform-managed.yaml` (or, for GitOps,
+  `examples/values-argocd-platform-managed.yaml`): `prerequisites.enabled=false`,
   `databaseProvisioning.enabled=false`, `secrets.mode=existing`, and
   `jobRetentionSeconds: 0`.
 * `extraEnvFrom` adds `envFrom` sources to the AFFiNE application container
@@ -272,7 +286,16 @@ spec:
 
 `ref: values` exposes `$values` at the root of the values repository. Omit `path` from that source when it supplies values only. Alternatively, keep a non-secret environment values file beside the chart and use a single pinned source. Do not attempt to load values from an unrelated repository through a relative path in a single-source Application.
 
-Sync waves are implementation-level ordering hints, not cross-Application readiness. Inspect rendered manifests for current wave values; no Helm hooks are used. Keep `prune` and `selfHeal` disabled until job reconciliation and data-retention behavior are tested.
+Sync waves are implementation-level ordering hints, not cross-Application readiness. Inspect rendered manifests for current wave values.
+
+Argo CD reports unknown custom resources — an Everest `DatabaseCluster` — as `Healthy` as soon as they exist, so a sync wave never waits for `status.state: ready`. Two ways to close that gap:
+
+* `argocd.databaseGate.enabled=true` (see `examples/values-argocd-platform-managed.yaml`): renders a `PreSync` hook Job that reads `DATABASE_URL`, parses host and port and probes with `nc -z` until the database accepts connections. Its ServiceAccount may only `get` the application Secret. It requires `secrets.mode: existing` with `databaseProvisioning.enabled=false` (the value is published by the platform, not by a chart Job). `helm install` ignores `argocd.argoproj.io/*` annotations, so this is opt-in and off by default. Tune `argocd.databaseGate.timeoutSeconds` / `intervalSeconds`; the Job is recreated on each sync (`hook-delete-policy: BeforeHookCreation`) in wave `-1`, after any chart-rendered Secrets.
+* A platform-level health check in `argocd-cm` (Lua) for `everest.percona.com/DatabaseCluster` — see `docs/operations.md`.
+
+Enable the gate before the first sync, keep `prune` and `selfHeal` disabled, and prove on the target release that a second unchanged sync recreates nothing (no new Job, migration marker unchanged) before turning on automation.
+
+Routing: keep `routing.mode: none` for the first sync. `routing.mode: ingress` with `routing.ingress.tls.enabled=true` requires a working certificate source — with the cert-manager annotation present but no issuer, the host becomes HTTPS-only and unreachable. Set `routing.ingress.tls.enabled=false` to serve plain HTTP until an issuer exists.
 
 ## Validate
 
@@ -283,7 +306,18 @@ Sync waves are implementation-level ordering hints, not cross-Application readin
 Static tests run `helm lint --strict`, `helm template`, values/schema
 validation and rendered-manifest assertions (waits, selectors, labels, digest
 pinning, Secret lifecycle, PVC lifecycle, DatabaseCluster retention, bootstrap
-patch hygiene).
+patch hygiene, Ingress TLS toggle, Argo CD database gate, Job-name stability and
+rotation).
+
+All four value profiles are lint-covered; run them explicitly when changing
+values or schema:
+
+```bash
+helm lint . --strict
+helm lint . --strict -f examples/values-dev.yaml
+helm lint . --strict -f examples/values-platform-managed.yaml
+helm lint . --strict -f examples/values-argocd-platform-managed.yaml
+```
 
 To also run the fresh-install / upgrade / uninstall race test against an
 isolated namespace (chart-managed container PostgreSQL and Redis, no shared

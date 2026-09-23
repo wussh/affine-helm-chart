@@ -18,11 +18,17 @@ Checks:
   --job-ttl-absent        no rendered Job has a ttlSecondsAfterFinished field
   --job-ttl-equals N      every rendered Job has ttlSecondsAfterFinished == N
   --extra-envfrom NAME    the affine container has an envFrom entry for NAME
+  --ingress-tls-secret N  the Ingress serves TLS from Secret N and keeps ssl-redirect=true
+  --ingress-no-tls        the Ingress renders no spec.tls and forces ssl-redirect=false
+  --gate-present          the argocd.databaseGate PreSync hook Job and its RBAC are rendered
+  --gate-absent           no database-gate Job or RBAC is rendered
+  --pvc-annotation K=V    a rendered claim carries annotation K with value V
   --databasecluster       a DatabaseCluster is rendered
   --no-databasecluster    no DatabaseCluster is rendered
   --dc-keep               DatabaseCluster carries helm.sh/resource-policy: keep
   --dc-no-keep            DatabaseCluster does not carry helm.sh/resource-policy: keep
 """
+import re
 import sys
 
 try:
@@ -49,8 +55,13 @@ while i < len(args):
         flags.add(a)
         i += 2
         continue
-    if a in ("--job-ttl-equals", "--extra-envfrom"):
+    if a in ("--job-ttl-equals", "--extra-envfrom", "--pvc-annotation"):
         values.setdefault(a, []).append(args[i + 1])
+        flags.add(a)
+        i += 2
+        continue
+    if a == "--ingress-tls-secret":
+        values[a] = args[i + 1]
         flags.add(a)
         i += 2
         continue
@@ -248,6 +259,127 @@ if "--no-bootstrap" in flags:
                     {"patch", "update"} & set(rule.get("verbs") or []):
                 fail(f"no bootstrap Job expected, but Role/{role['metadata']['name']} can write Secrets")
 
+def application_database_secret_name():
+    # The application Secret name is the one every workload reads DATABASE_URL
+    # from, so the gate's RBAC scope can be checked against the real target.
+    for _d, spec in pod_specs():
+        for c in containers_of(spec):
+            for e in c.get("env") or []:
+                ref = (e.get("valueFrom") or {}).get("secretKeyRef") or {}
+                if e.get("name") == "DATABASE_URL" and ref.get("name"):
+                    return ref["name"]
+    return None
+
+
+if "--gate-present" in flags:
+    # argocd.databaseGate.enabled=true: an Argo CD PreSync hook Job waits for the
+    # database endpoint before the application and migration waves run, using
+    # read access to the single application Secret (get only).
+    gates = [j for j in by_kind("Job") if j["metadata"]["name"].endswith("-db-gate")]
+    if len(gates) != 1:
+        fail(f"expected exactly one database-gate Job, found {[j['metadata']['name'] for j in gates]}")
+    else:
+        gate = gates[0]
+        gname = gate["metadata"]["name"]
+        ann = gate.get("metadata", {}).get("annotations") or {}
+        if ann.get("argocd.argoproj.io/hook") != "PreSync":
+            fail(f"Job/{gname} is not an Argo CD PreSync hook "
+                 f"(hook={ann.get('argocd.argoproj.io/hook')!r})")
+        if ann.get("argocd.argoproj.io/hook-delete-policy") != "BeforeHookCreation":
+            fail(f"Job/{gname} hook-delete-policy="
+                 f"{ann.get('argocd.argoproj.io/hook-delete-policy')!r}, "
+                 "expected 'BeforeHookCreation'")
+        spec = gate["spec"]["template"]["spec"]
+        if spec.get("serviceAccountName") != gname:
+            fail(f"Job/{gname} serviceAccountName={spec.get('serviceAccountName')!r}, "
+                 f"expected the gate's own ServiceAccount/{gname}")
+        if named("ServiceAccount", gname) is None:
+            fail(f"Job/{gname} has no matching ServiceAccount/{gname}")
+
+        containers = spec.get("containers") or []
+        if len(containers) != 1:
+            fail(f"Job/{gname} must run exactly one container, found "
+                 f"{[c.get('name') for c in containers]}")
+        scripts = []
+        for c in containers:
+            scripts.extend(c.get("args") or [])
+            scripts.extend(c.get("command") or [])
+        script = "\n".join(scripts)
+        if "DATABASE_URL" not in script:
+            fail(f"Job/{gname} script does not read DATABASE_URL")
+        if "nc -z" not in script:
+            fail(f"Job/{gname} script does not probe the endpoint with nc -z")
+        if "cat " in script:
+            fail(f"Job/{gname} script prints a Secret value via cat")
+        ns_match = re.search(r"^SECRET_NS=(\S+)$", script, re.M)
+        name_match = re.search(r"^SECRET_NAME=(\S+)$", script, re.M)
+        if not ns_match:
+            fail(f"Job/{gname} script does not name the Secret namespace it reads")
+        if not name_match:
+            fail(f"Job/{gname} script does not name the Secret it reads")
+        secret_ns = ns_match.group(1) if ns_match else None
+        secret_name = name_match.group(1) if name_match else None
+        app_secret = application_database_secret_name()
+        if app_secret is None:
+            fail("no rendered workload reads DATABASE_URL from a Secret; "
+                 f"cannot verify the Secret scope of Job/{gname}")
+        elif secret_name and secret_name != app_secret:
+            fail(f"Job/{gname} reads SECRET_NAME={secret_name!r}, "
+                 f"but the workloads read {app_secret!r}")
+
+        roles = [r for r in by_kind("Role") if r["metadata"]["name"] == gname]
+        if len(roles) != 1:
+            fail(f"expected exactly one Role/{gname}, found {len(roles)}")
+        else:
+            role = roles[0]
+            if secret_ns and role.get("metadata", {}).get("namespace") != secret_ns:
+                fail(f"Role/{gname} is in namespace "
+                     f"{role.get('metadata', {}).get('namespace')!r}, but the gate reads the "
+                     f"Secret from {secret_ns!r}")
+            rules = role.get("rules") or []
+            if len(rules) != 1:
+                fail(f"Role/{gname} must grant exactly one rule, found {len(rules)}")
+            for rule in rules:
+                if set(rule.get("verbs") or []) != {"get"}:
+                    fail(f"Role/{gname} grants verbs {rule.get('verbs')!r}; only get is allowed")
+                if set(rule.get("resources") or []) != {"secrets"}:
+                    fail(f"Role/{gname} grants on resources {rule.get('resources')!r}; "
+                         "only secrets is allowed")
+                names = rule.get("resourceNames") or []
+                if not names:
+                    fail(f"Role/{gname} has no resourceNames, so it can read every Secret")
+                elif app_secret and app_secret not in names:
+                    fail(f"Role/{gname} resourceNames={names} does not include the "
+                         f"application Secret {app_secret!r}")
+
+        bindings = [b for b in by_kind("RoleBinding") if b["metadata"]["name"] == gname]
+        if len(bindings) != 1:
+            fail(f"expected exactly one RoleBinding/{gname}, found {len(bindings)}")
+        else:
+            rb = bindings[0]
+            ref = rb.get("roleRef") or {}
+            if ref.get("kind") != "Role" or ref.get("name") != gname:
+                fail(f"RoleBinding/{gname} roleRef={ref!r} does not bind Role/{gname}")
+            subject = next((s for s in rb.get("subjects") or []
+                            if s.get("kind") == "ServiceAccount" and s.get("name") == gname), None)
+            if subject is None:
+                fail(f"RoleBinding/{gname} does not bind ServiceAccount/{gname}")
+            elif secret_ns and subject.get("namespace") != secret_ns:
+                fail(f"RoleBinding/{gname} binds ServiceAccount/{gname} in namespace "
+                     f"{subject.get('namespace')!r}, not {secret_ns!r}")
+            if secret_ns and rb.get("metadata", {}).get("namespace") != secret_ns:
+                fail(f"RoleBinding/{gname} is in namespace "
+                     f"{rb.get('metadata', {}).get('namespace')!r}, not {secret_ns!r}")
+
+if "--gate-absent" in flags:
+    # argocd.databaseGate.enabled=false (the default): no gate object at all,
+    # otherwise `helm install` and non-Argo CD upgrades carry a stray PreSync Job.
+    for kind in ("Job", "ServiceAccount", "Role", "RoleBinding"):
+        for d in by_kind(kind):
+            if d["metadata"]["name"].endswith("-db-gate"):
+                fail(f"unexpected {kind}/{d['metadata']['name']} rendered with the "
+                     "database gate disabled")
+
 if "--job-ttl" in flags:
     # Every rendered Job must bound its own history, or repeated upgrades
     # accumulate one Job per checksum revision forever.
@@ -276,6 +408,45 @@ if "--job-ttl-equals" in flags:
         ttl = j["spec"].get("ttlSecondsAfterFinished")
         if ttl != want:
             fail(f"Job/{j['metadata']['name']} has ttlSecondsAfterFinished={ttl!r}, expected {want}")
+
+if "--ingress-tls-secret" in flags:
+    # tls.enabled=true must serve TLS from the configured Secret and keep the
+    # default ssl-redirect=true annotation, so the host is not plaintext.
+    ings = by_kind("Ingress")
+    if len(ings) != 1:
+        fail(f"expected exactly one Ingress, found {len(ings)}")
+    else:
+        ing = ings[0]
+        want = values["--ingress-tls-secret"]
+        tls = ing["spec"].get("tls")
+        if not tls:
+            fail(f"Ingress/{ing['metadata']['name']} renders no spec.tls (expected secretName {want!r})")
+        elif tls[0].get("secretName") != want:
+            fail(f"Ingress/{ing['metadata']['name']} spec.tls[0].secretName="
+                 f"{tls[0].get('secretName')!r}, expected {want!r}")
+        got = (ing.get("metadata", {}).get("annotations") or {}).get(
+            "nginx.ingress.kubernetes.io/ssl-redirect")
+        if got != "true":
+            fail(f"Ingress/{ing['metadata']['name']} ssl-redirect={got!r}, expected 'true'")
+
+if "--ingress-no-tls" in flags:
+    # tls.enabled=false must render no spec.tls at all (otherwise nginx still
+    # expects a certificate) and force ssl-redirect=false while keeping the
+    # other default annotations.
+    ings = by_kind("Ingress")
+    if len(ings) != 1:
+        fail(f"expected exactly one Ingress, found {len(ings)}")
+    else:
+        ing = ings[0]
+        ann = ing.get("metadata", {}).get("annotations") or {}
+        if "tls" in ing["spec"]:
+            fail(f"Ingress/{ing['metadata']['name']} renders spec.tls with tls.enabled=false")
+        got = ann.get("nginx.ingress.kubernetes.io/ssl-redirect")
+        if got != "false":
+            fail(f"Ingress/{ing['metadata']['name']} ssl-redirect={got!r}, expected 'false'")
+        if "nginx.ingress.kubernetes.io/proxy-body-size" not in ann:
+            fail(f"Ingress/{ing['metadata']['name']} dropped the default annotations "
+                 "with tls.enabled=false")
 
 if "--extra-envfrom" in flags:
     # The extension point must reach the application container: an envFrom that
@@ -354,6 +525,26 @@ if "--no-pvc-substr" in flags:
                 fail(f"unexpected PVC/{d['metadata']['name']} rendered")
 if "--no-pvc" in flags and by_kind("PersistentVolumeClaim"):
     fail("no PVC objects were expected, but some were rendered")
+if "--pvc-annotation" in flags:
+    # Extra claim annotations (for example a Velero/Kasten selector) either land
+    # on a rendered claim or the backup tooling silently ignores the volume.
+    claims = by_kind("PersistentVolumeClaim")
+    if not claims:
+        fail("no PersistentVolumeClaim rendered to check annotations")
+    for entry in values["--pvc-annotation"]:
+        if "=" not in entry:
+            fail(f"--pvc-annotation expects KEY=VALUE, got {entry!r}")
+            continue
+        key, want = entry.split("=", 1)
+        carried = [c for c in claims
+                   if key in (c.get("metadata", {}).get("annotations") or {})]
+        if not carried:
+            fail(f"no rendered claim carries annotation {key} "
+                 f"(claims: {sorted(c['metadata']['name'] for c in claims)})")
+        elif not any(c["metadata"]["annotations"][key] == want for c in carried):
+            fail(f"annotation {key} is "
+                 f"{sorted(c['metadata']['annotations'][key] for c in carried)!r}, "
+                 f"expected {want!r}")
 
 dcs = by_kind("DatabaseCluster")
 if "--databasecluster" in flags and not dcs:

@@ -1,4 +1,9 @@
 {{- if and .Values.application.enabled (eq .Values.routing.mode "ingress") }}
+{{- $tls := .Values.routing.ingress.tls.enabled }}
+{{- $annotations := deepCopy .Values.routing.ingress.annotations }}
+{{- if not $tls }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/ssl-redirect" "false" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -6,10 +11,12 @@ metadata:
   labels: {{- include "affine.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
-    {{- toYaml .Values.routing.ingress.annotations | nindent 4 }}
+    {{- toYaml $annotations | nindent 4 }}
 spec:
   ingressClassName: {{ .Values.routing.ingress.className }}
+  {{- if $tls }}
   tls: [{secretName: {{ .Values.routing.ingress.tlsSecretName }}, hosts: [{{ .Values.routing.host }}]}]
+  {{- end }}
   rules:
     - host: {{ .Values.routing.host }}
       http:

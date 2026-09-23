@@ -295,6 +295,9 @@ persistence:
     retain: true
     size: 20Gi
     storageClass: storage-nvme-c1
+    # Extra annotations for the chart-rendered claim (ignored when create=false).
+    # Use it for backup tooling, e.g. a Velero/Kasten selector.
+    annotations: {}
   config:
     # AFFiNE config directory (config.json is mounted from a ConfigMap here).
     create: true
@@ -302,6 +305,8 @@ persistence:
     retain: true
     size: 1Gi
     storageClass: storage-nvme-c1
+    # Extra annotations for the chart-rendered claim (ignored when create=false).
+    annotations: {}
 
 # Container health probes (HTTP /api/health on port 3010).
 probes:
@@ -339,7 +344,19 @@ routing:
       nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
       nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    # TLS Secret name for the Ingress certificate.
+    # TLS for the Ingress.
+    #   enabled=true  -> render spec.tls with tlsSecretName below. Requires a
+    #                    working certificate source (for example the cert-manager
+    #                    annotation above). With ssl-redirect=true a certificate
+    #                    that never appears makes the host HTTPS-only and
+    #                    unreachable.
+    #   enabled=false -> render no spec.tls and force
+    #                    nginx.ingress.kubernetes.io/ssl-redirect=false, so the
+    #                    host stays reachable over plain HTTP on clusters with no
+    #                    issuer yet. Other annotations are preserved.
+    tls:
+      enabled: true
+    # TLS Secret name for the Ingress certificate (required when tls.enabled).
     tlsSecretName: affine-tls
   gateway:
     # Gateway API references used when routing.mode=gateway.
@@ -347,6 +364,27 @@ routing:
     namespace: kgateway-system
     httpSectionName: http
     httpsSectionName: https
+
+# Argo CD integration helpers.
+#
+# Argo CD reports unknown custom resources (for example an Everest
+# DatabaseCluster) as Healthy as soon as they exist, so sync waves do not wait
+# for `status.state: ready`. The optional PreSync hook below makes that wait
+# explicit: it reads DATABASE_URL from the application Secret and probes the
+# database endpoint until it accepts TCP connections, so the application and
+# migration waves only start against a reachable database.
+#
+# `helm install` ignores argocd.argoproj.io/* annotations, so the gate is off by
+# default and only GitOps values enable it.
+argocd:
+  databaseGate:
+    enabled: false
+    # Fail the sync after this many seconds of unsuccessful probing.
+    timeoutSeconds: 900
+    # Seconds between probe attempts.
+    intervalSeconds: 5
+    # Image with kubectl + nc. Empty -> prerequisites.bootstrap.image.
+    image: ""
 
 # Values written into the AFFiNE config.json ConfigMap.
 config:

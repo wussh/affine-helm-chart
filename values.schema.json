@@ -21,6 +21,7 @@
     "probes",
     "service",
     "routing",
+    "argocd",
     "config"
   ],
   "properties": {
@@ -284,11 +285,17 @@
         "ingress": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["className", "annotations", "tlsSecretName"],
+          "required": ["className", "annotations", "tls", "tlsSecretName"],
           "properties": {
             "className": {"type": "string", "minLength": 1},
             "annotations": {"type": "object"},
-            "tlsSecretName": {"type": "string", "minLength": 1}
+            "tls": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled"],
+              "properties": {"enabled": {"type": "boolean"}}
+            },
+            "tlsSecretName": {"type": "string"}
           }
         },
         "gateway": {
@@ -300,6 +307,24 @@
             "namespace": {"type": "string", "minLength": 1},
             "httpSectionName": {"type": "string", "minLength": 1},
             "httpsSectionName": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "argocd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["databaseGate"],
+      "properties": {
+        "databaseGate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "timeoutSeconds", "intervalSeconds", "image"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "timeoutSeconds": {"type": "integer", "minimum": 1},
+            "intervalSeconds": {"type": "integer", "minimum": 1},
+            "image": {"type": "string", "pattern": "^$|@sha256:[a-f0-9]{64}$"}
           }
         }
       }
@@ -318,13 +343,14 @@
     "affineClaim": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["create", "existingClaim", "retain", "size", "storageClass"],
+      "required": ["create", "existingClaim", "retain", "size", "storageClass", "annotations"],
       "properties": {
         "create": {"type": "boolean"},
         "existingClaim": {"type": "string"},
         "retain": {"type": "boolean"},
         "size": {"type": "string", "minLength": 1},
-        "storageClass": {"type": "string", "minLength": 1}
+        "storageClass": {"type": "string", "minLength": 1},
+        "annotations": {"type": "object"}
       }
     },
     "prerequisiteClaim": {
@@ -475,6 +501,27 @@
                   "persistence": {"required": ["existingClaim"], "properties": {"existingClaim": {"minLength": 1}}}
                 }
               }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "routing": {
+            "properties": {
+              "mode": {"const": "ingress"},
+              "ingress": {"properties": {"tls": {"properties": {"enabled": {"const": true}}}}}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "routing": {
+            "properties": {
+              "ingress": {"properties": {"tlsSecretName": {"minLength": 1}}}
             }
           }
         }

@@ -1,0 +1,102 @@
+{{- if .Values.argocd.databaseGate.enabled }}
+{{- $gateImage := .Values.argocd.databaseGate.image | default .Values.prerequisites.bootstrap.image }}
+{{- $secretNamespace := include "affine.databaseSecretNamespace" . }}
+{{- $secretName := include "affine.databaseSecretName" . }}
+{{- $gate := printf "%s-db-gate" (include "affine.fullname" .) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $gate }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations: {argocd.argoproj.io/sync-wave: "-1"}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $gate }}
+  namespace: {{ $secretNamespace }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations: {argocd.argoproj.io/sync-wave: "-1"}
+rules:
+  # get only, on the single application Secret, so the gate can read
+  # DATABASE_URL and nothing else.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ $secretName }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $gate }}
+  namespace: {{ $secretNamespace }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations: {argocd.argoproj.io/sync-wave: "-1"}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $gate }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $gate }}
+---
+# Argo CD PreSync hook: Argo CD treats unknown CRs (for example an Everest
+# DatabaseCluster) as Healthy as soon as they exist, so sync waves do not wait
+# for `status.state: ready`. This Job makes that wait explicit before the
+# application and migration waves run. `helm install` ignores the
+# argocd.argoproj.io/* annotations, which is why the gate is opt-in.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $gate }}
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add (int .Values.argocd.databaseGate.timeoutSeconds) 60 }}
+  template:
+    metadata:
+      labels: {{- include "affine.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $gate }}
+      automountServiceAccountToken: true
+      containers:
+        - name: wait-database
+          image: {{ $gateImage }}
+          command: [sh, -ec]
+          args:
+            - |
+              SECRET_NS={{ $secretNamespace }}
+              SECRET_NAME={{ $secretName }}
+              URL="$(kubectl -n "$SECRET_NS" get secret "$SECRET_NAME" -o jsonpath="{.data['DATABASE_URL']}" | base64 -d)"
+              [ -n "$URL" ] || { echo "[ERROR] DATABASE_URL is empty in Secret ${SECRET_NS}/${SECRET_NAME}" >&2; exit 1; }
+              # Strip credentials: keep everything after the last '@'.
+              HOSTPORT="${URL##*@}"
+              HOSTPORT="${HOSTPORT%%/*}"
+              HOST="${HOSTPORT%%:*}"
+              PORT="${HOSTPORT##*:}"
+              [ "$PORT" = "$HOSTPORT" ] && PORT=5432
+              [ -n "$HOST" ] || { echo "[ERROR] could not parse a host from DATABASE_URL in Secret ${SECRET_NS}/${SECRET_NAME}" >&2; exit 1; }
+              TIMEOUT={{ .Values.argocd.databaseGate.timeoutSeconds }}
+              INTERVAL={{ .Values.argocd.databaseGate.intervalSeconds }}
+              _elapsed=0
+              until nc -z "$HOST" "$PORT"; do
+                if [ "$_elapsed" -ge "$TIMEOUT" ]; then
+                  echo "[ERROR] Timeout (${TIMEOUT}s) waiting for database ${HOST}:${PORT} (Secret ${SECRET_NS}/${SECRET_NAME})" >&2
+                  exit 1
+                fi
+                echo "[INFO] database ${HOST}:${PORT} not reachable yet (${_elapsed}s/${TIMEOUT}s)"
+                sleep "$INTERVAL"
+                _elapsed=$((_elapsed + INTERVAL))
+              done
+              echo "[INFO] database ${HOST}:${PORT} is accepting connections; releasing the sync."
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+{{- end }}
