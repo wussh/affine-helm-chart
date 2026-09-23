@@ -1,6 +1,6 @@
 # AFFiNE Helm Chart
 
-Minimal Helm chart for self-hosted AFFiNE `0.27.4` (chart `0.2.1`).
+Minimal Helm chart for self-hosted AFFiNE `0.27.4` (chart `0.2.3`).
 
 ## Documentation
 
