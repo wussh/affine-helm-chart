@@ -381,7 +381,10 @@ argocd:
     enabled: false
     # Fail the sync after this many seconds of unsuccessful probing.
     timeoutSeconds: 900
-    # Seconds between probe attempts.
+    # Seconds between probe attempts (schema-capped at 60). Each attempt is
+    # bounded by `nc -z -w <intervalSeconds>`, and the Job deadline is computed
+    # as timeoutSeconds + 2 * intervalSeconds + 30, so the probe timeout is
+    # always reported before the Job is killed.
     intervalSeconds: 5
     # Image with kubectl + nc. Empty -> prerequisites.bootstrap.image.
     image: ""

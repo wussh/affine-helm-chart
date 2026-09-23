@@ -329,17 +329,21 @@ if "--gate-present" in flags:
                  "nc-timeout + sleep, so a counter under-counts and the Job is killed "
                  "before it can report the timeout")
         timeout_match = re.search(r"^TIMEOUT=(\d+)$", script, re.M)
-        if timeout_match is None:
-            fail(f"Job/{gname} script does not define TIMEOUT")
+        interval_match = re.search(r"^INTERVAL=(\d+)$", script, re.M)
+        if timeout_match is None or interval_match is None:
+            fail(f"Job/{gname} script does not define TIMEOUT and INTERVAL")
         else:
             probe_timeout = int(timeout_match.group(1))
+            interval = int(interval_match.group(1))
             deadline = gate["spec"].get("activeDeadlineSeconds")
+            required = probe_timeout + 2 * interval + 30
             if not isinstance(deadline, int):
                 fail(f"Job/{gname} has no activeDeadlineSeconds")
-            elif deadline <= probe_timeout:
-                fail(f"Job/{gname} activeDeadlineSeconds={deadline} must exceed the probe "
-                     f"timeout {probe_timeout}s, otherwise the Job is killed before it can "
-                     "report the timeout")
+            elif deadline < required:
+                fail(f"Job/{gname} activeDeadlineSeconds={deadline} must be at least "
+                     f"timeout + 2*interval + 30 = {required}s: one iteration costs up to "
+                     "nc -w + sleep, so a probe that starts near the timeout would otherwise "
+                     "be killed before the script reports it")
         env = containers[0].get("env") or []
         url_env = next((e for e in env if e.get("name") == "DATABASE_URL"), None)
         if url_env is None:

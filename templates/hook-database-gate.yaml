@@ -25,7 +25,11 @@ metadata:
     argocd.argoproj.io/sync-wave: "-1"
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: {{ add (int .Values.argocd.databaseGate.timeoutSeconds) 60 }}
+  # One probe iteration can cost up to `2 × intervalSeconds` (nc -w plus sleep),
+  # so the deadline must cover the probe timeout plus two intervals, not a fixed
+  # margin, or a large interval lets the Job be killed before it reports the
+  # timeout. intervalSeconds is schema-capped at 60.
+  activeDeadlineSeconds: {{ add (int .Values.argocd.databaseGate.timeoutSeconds) (add (mul 2 (int .Values.argocd.databaseGate.intervalSeconds)) 30) }}
   template:
     metadata:
       labels: {{- include "affine.labels" . | nindent 8 }}

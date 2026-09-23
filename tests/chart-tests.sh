@@ -396,6 +396,9 @@ render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.ya
     --release affine-tests --extra-envfrom affine-extra-config
 expect_fail_msg "reject malformed extraEnvFrom entry" "extraEnvFrom" \
   helm template t "$CHART" -f "$DEV" --set extraEnvFrom[0].bogus=1
+expect_fail_msg "reject database gate interval above the schema cap" "intervalSeconds" \
+  helm template t "$CHART" -f "$CHART/examples/values-argocd-platform-managed.yaml" \
+    --set argocd.databaseGate.intervalSeconds=61
 
 echo "# static: credential hygiene"
 if grep -RInE 'postgresql://[^<[:space:]]+:[^<[:space:]]+@' \
