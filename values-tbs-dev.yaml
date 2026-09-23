@@ -1,0 +1,8 @@
+# Migration-only rollout against the tbs-dev gateway route. The
+# affine-database/affine-redis Secrets must already exist (secrets.mode=existing).
+application:
+  enabled: false
+migration:
+  enabled: true
+routing:
+  mode: gateway

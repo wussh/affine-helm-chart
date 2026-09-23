@@ -1,0 +1,343 @@
+# =============================================================================
+# AFFiNE Helm chart values
+#
+# Defaults deploy nothing on purpose: application, migration and prerequisites
+# are all disabled. Nothing is rendered with the default values, which makes a
+# bare `helm template` safe and forces every install to opt in explicitly. Use
+# examples/values-dev.yaml for a working standalone install, or provide your
+# own values file. Every enabled component validates its required values and
+# fails fast with a readable explanation instead of rendering broken manifests.
+#
+# Option index (all keys are validated against values.schema.json):
+#   replicaCount                      AFFiNE pod count (fixed at 1)
+#   application.enabled               render the AFFiNE Deployment/Service
+#   migration.enabled                 render the migration Job + wait gate
+#   jobRetentionSeconds               TTL for finished Jobs
+#   databaseProvisioning.*            create the app DB role/database
+#   prerequisites.*                   database + Redis prerequisites
+#   image.*                           AFFiNE container image
+#   secrets.*                         Secret lifecycle (create | existing)
+#   resources / migrationResources    CPU/memory for app and migration
+#   migrationActiveDeadlineSeconds    migration Job deadline
+#   serviceAccount.* / securityContext
+#   persistence.*                     AFFiNE storage + config claims
+#   probes.* / service.*              health checks and Service
+#   routing.*                         none | ingress | gateway exposure
+#   config.*                          AFFiNE server config.json values
+# =============================================================================
+
+# Number of AFFiNE replicas. Intentionally fixed at 1: AFFiNE is stateful
+# behind a ReadWriteOnce storage claim and the chart does not support
+# multi-replica coordination. Schema enforces minimum=1, maximum=1.
+replicaCount: 1
+
+# Render the AFFiNE Deployment and its Service. When false the chart deploys
+# only the components you enable explicitly (for example migration-only
+# rollouts, see values-tbs-dev.yaml).
+application:
+  enabled: false
+
+# Render the migration Job and the Deployment's wait-migration gate.
+migration:
+  enabled: false
+  # Bump this whenever the migration Job template changes materially. It is
+  # folded into the Job's checksum name so the name rotates instead of Helm
+  # trying to patch immutable Job fields on upgrade.
+  templateRevision: "2"
+  # How often (seconds) the Deployment's wait-migration init container polls
+  # the database for the migration completion marker.
+  waitIntervalSeconds: 5
+
+# Time-to-live applied as `ttlSecondsAfterFinished` to every finished Job
+# (bootstrap, database-provision, migration). Bounds Job accumulation across
+# repeated upgrades: Job names are checksum-versioned, so without a TTL each
+# changed revision would leave its Jobs behind forever.
+#   > 0  delete a finished Job after this many seconds (default 3600 = 1h,
+#        long enough to inspect a failed Job's logs and events)
+#   0    keep finished Jobs forever (not recommended; history grows unbounded)
+jobRetentionSeconds: 3600
+
+# Optional creation of the application database role and database.
+# Requires prerequisites.enabled=true (the bootstrap Job is what publishes the
+# derived DATABASE_URL). Not supported with database.mode=container or
+# external. With secrets.mode=existing it additionally requires
+# secrets.database.allowBootstrapPatch=true, because a freshly created role
+# means DATABASE_URL cannot pre-exist.
+databaseProvisioning:
+  enabled: false
+  # Name of the application database to create/own.
+  database: affine
+  # Bootstrap image that runs the provisioning and Secret-waiting scripts.
+  # Pin by digest; `tag` is only used when `digest` is empty.
+  image:
+    repository: wushie/affine-db-bootstrap
+    tag: sha-a093cc8
+    digest: sha256:a4d188f62069f24328a553cf62b257b3960834ce8908ee3984bfaf5f3e0e0c38
+    pullPolicy: IfNotPresent
+  # Admin credentials used to connect and create the application role.
+  admin:
+    # Secret holding admin credentials. Empty -> reuse the prerequisite
+    # database credential Secret (prerequisites.database.userSecretName /
+    # .secret.name depending on secrets.mode).
+    secretName: ""
+    # Keys inside that Secret. Defaults match the Everest/PgBouncer layout.
+    hostKey: pgbouncer-host
+    portKey: pgbouncer-port
+    usernameKey: user
+    passwordKey: password
+  # Keys in the application Secret that hold the generated role credentials.
+  # Only used with secrets.mode=create (the chart renders them from
+  # secrets.database.data.POSTGRES_USERNAME/PASSWORD).
+  application:
+    usernameKey: POSTGRES_USERNAME
+    passwordKey: POSTGRES_PASSWORD
+  # Poll interval and timeout (seconds) while waiting for the database/Secret.
+  waitIntervalSeconds: 5
+  waitTimeoutSeconds: 300
+
+prerequisites:
+  # Master switch for chart-managed database and Redis prerequisites.
+  enabled: false
+  database:
+    # everest:   manage an Everest DatabaseCluster (may be cross-namespace).
+    # container: run a single PostgreSQL container (dev only).
+    # external:  bring your own database; the chart only publishes DATABASE_URL.
+    mode: everest
+    # DatabaseCluster name (everest) or workload name (container).
+    name: db-affine
+    # Namespace of the prerequisite database. Empty -> the release namespace.
+    # Set `prod` for prod/db-affine.
+    namespace: ""
+    # Reuse a DatabaseCluster that already exists instead of rendering one.
+    # Required on reinstall after an uninstall that retained the cluster via
+    # persistencePolicy=keep when the release name changed (a same-name
+    # reinstall is adopted by Helm automatically). When false the chart refuses
+    # to render over a DatabaseCluster owned by another release, failing with an
+    # ownership error rather than a raw "already exists". Only valid with
+    # mode=everest.
+    existing: false
+    # Name of the externally managed credential Secret (secrets.mode=existing)
+    # or the chart-rendered one (secrets.mode=create).
+    userSecretName: everest-secrets-db-affine
+    # Chart-rendered credential Secret when secrets.mode=create.
+    # Never commit credentials; supply via a private values file or --set.
+    secret:
+      name: everest-secrets-db-affine
+      username: ""
+      password: ""
+    # PostgreSQL version for the Everest cluster (schema: 16.x).
+    version: "16.4"
+    # Storage class and size for the database volume.
+    storageClass: storage-nvme-c1
+    storageSize: 25Gi
+    # Fixed at 1 replica (schema enforces it).
+    replicas: 1
+    # Lifecycle of the Everest DatabaseCluster:
+    #   keep   (default) add helm.sh/resource-policy: keep so `helm uninstall`
+    #          leaves the database and its data intact; the resource then
+    #          outlives the release and is adopted again on reinstall (or reused
+    #          with database.existing=true).
+    #   delete explicit opt-in to deletion on uninstall. Destructive; only use
+    #          when data durability is handled elsewhere.
+    persistencePolicy: keep
+    # Only used with mode=container.
+    container:
+      # Pinned PostgreSQL image (schema requires docker.io/library/postgres@sha256:…).
+      image: docker.io/library/postgres@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
+      # Default database created inside the container.
+      database: postgres
+    # Container-mode PVC lifecycle (ignored for everest/external).
+    persistence:
+      # true  -> render the PVC (name from existingClaim, else <name>-data)
+      # false -> render no PVC; existingClaim is then required
+      create: true
+      # Name an existing PVC to reuse instead of creating one.
+      existingClaim: ""
+      # true  -> add helm.sh/resource-policy: keep (survives uninstall)
+      retain: true
+  # Bootstrap Job settings (waits for the database, composes DATABASE_URL).
+  bootstrap:
+    # Pinned image for the bootstrap Job (kubectl + shell).
+    image: docker.io/alpine/k8s@sha256:b0523f0a244ddc4c8e055aa335c040d3d78b3ead5528f4544395f7f9f69c7b68
+    # Hard deadline (seconds) for the bootstrap Job before it is failed.
+    activeDeadlineSeconds: 900
+  redis:
+    # Deploy a single dedicated Redis instance as a prerequisite.
+    enabled: true
+    # Service, Deployment and default PVC name for Redis.
+    name: affine-redis
+    # Pinned Redis image.
+    image: docker.io/library/redis@sha256:bb142a9c18ac18a16713c1491d779697b4e107c22a97266616099d288237ef47
+    storageClass: storage-nvme-c1
+    storageSize: 5Gi
+    # Redis PVC lifecycle; same create/existingClaim/retain semantics as above.
+    persistence:
+      create: true
+      existingClaim: ""
+      retain: true
+
+# AFFiNE application image. Pin by digest for reproducible installs; `tag` is
+# informational and must match Chart.appVersion (schema enforces 0.27.4).
+image:
+  repository: ghcr.io/toeverything/affine
+  tag: "0.27.4"
+  digest: sha256:b649f5ce2384ffdf13c23bccf81d759e15973d59d0b0058af65d895a84373099
+  pullPolicy: IfNotPresent
+
+# secrets.mode is the single source of truth for Secret lifecycle:
+#   create   -> chart renders the database and Redis Secrets from the `data`
+#               blocks below, and the bootstrap Job may patch DATABASE_URL.
+#   existing -> strictly read-only: the chart renders no Secrets and never
+#               patches, annotates, or deletes them. It only references the
+#               names. DATABASE_URL must already be present in the external
+#               Secret. No chart-created Job or Role gets a write verb on the
+#               external Secret; the bootstrap Job is not rendered unless
+#               secrets.database.allowBootstrapPatch=true (the one explicit
+#               opt-in).
+secrets:
+  mode: existing
+  database:
+    # Name of the application database Secret.
+    name: affine-database
+    # Must match the release namespace when set: secretKeyRef is
+    # namespace-local, so cross-namespace references are rejected.
+    namespace: ""
+    # How often (seconds) init containers re-check that DATABASE_URL appeared.
+    waitIntervalSeconds: 5
+    # How long (seconds) init containers wait for DATABASE_URL before failing.
+    waitTimeoutSeconds: 900
+    # Deliberately explicit, non-default opt-in. Only meaningful with
+    # secrets.mode=existing. When true the chart-managed bootstrap Job may
+    # publish DATABASE_URL into the external Secret (a single-key patch, nothing
+    # else). This is NOT adoption: the chart still does not own, label,
+    # annotate, or delete the Secret. Leave false when a controller (External
+    # Secrets Operator, Sealed Secrets, Vault) owns DATABASE_URL.
+    allowBootstrapPatch: false
+    # Values used when secrets.mode=create. Required keys vary:
+    #   DATABASE_URL       required when no bootstrap can publish it
+    #   POSTGRES_USERNAME  required with databaseProvisioning.enabled=true
+    #   POSTGRES_PASSWORD  required with databaseProvisioning.enabled=true
+    data:
+      DATABASE_URL: ""
+      POSTGRES_USERNAME: ""
+      POSTGRES_PASSWORD: ""
+  redis:
+    # Name of the Redis Secret (rendered only with secrets.mode=create).
+    name: affine-redis
+    # Must match the release namespace when set.
+    namespace: ""
+    # Values used when secrets.mode=create. All keys are required in that mode;
+    # in existing mode the external Secret must provide them.
+    data:
+      REDIS_SERVER_HOST: affine-redis
+      REDIS_SERVER_PORT: "6379"
+      REDIS_SERVER_USERNAME: default
+      REDIS_SERVER_PASSWORD: ""
+      REDIS_SERVER_DATABASE: "0"
+
+# AFFiNE container resource requests/limits.
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "4"
+    memory: "4Gi"
+# Resource requests/limits for the migration container.
+migrationResources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+# Hard deadline (seconds) for the migration Job, and the default upper bound
+# for the Deployment's wait-migration gate.
+migrationActiveDeadlineSeconds: 900
+
+# ServiceAccount used by the AFFiNE Deployment and Jobs. `name` empty -> the
+# release name is used. `create=false` requires you to provide the account.
+serviceAccount:
+  create: true
+  name: ""
+
+# Pod/container security context applied to AFFiNE and the migration container.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+
+# AFFiNE storage and config claims.
+#   create=true  -> chart renders the PVC (named <release>-storage /
+#                   <release>-config unless existingClaim is set).
+#   create=false -> no PVC is rendered; existingClaim is required.
+#   retain=true  -> chart-created PVCs survive helm uninstall.
+persistence:
+  storage:
+    # Uploaded files and application data.
+    create: true
+    existingClaim: ""
+    retain: true
+    size: 20Gi
+    storageClass: storage-nvme-c1
+  config:
+    # AFFiNE config directory (config.json is mounted from a ConfigMap here).
+    create: true
+    existingClaim: ""
+    retain: true
+    size: 1Gi
+    storageClass: storage-nvme-c1
+
+# Container health probes (HTTP /api/health on port 3010).
+probes:
+  # startup: allow up to 30 x 10s = 5m for AFFiNE to boot before other probes.
+  startup:
+    httpGet: {path: /api/health, port: 3010}
+    failureThreshold: 30
+    periodSeconds: 10
+  readiness:
+    httpGet: {path: /api/health, port: 3010}
+    periodSeconds: 10
+  liveness:
+    httpGet: {path: /api/health, port: 3010}
+    periodSeconds: 20
+
+# Internal Service for the AFFiNE Deployment.
+service:
+  type: ClusterIP
+  port: 3010
+
+# External exposure.
+#   mode=none    -> nothing rendered
+#   mode=ingress -> render networking.k8s.io/v1 Ingress below
+#   mode=gateway -> render a Gateway API HTTPRoute to the gateway below
+routing:
+  mode: none
+  # Hostname used by both ingress and HTTPRoute.
+  host: affine.dev.tbs.cloudeka.xyz
+  ingress:
+    className: nginx
+    # Annotations applied to the Ingress (cert-manager + nginx tuning).
+    annotations:
+      cert-manager.io/cluster-issuer: lets-encrypt-http-issuer
+      nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # TLS Secret name for the Ingress certificate.
+    tlsSecretName: affine-tls
+  gateway:
+    # Gateway API references used when routing.mode=gateway.
+    name: gateway-external
+    namespace: kgateway-system
+    httpSectionName: http
+    httpsSectionName: https
+
+# Values written into the AFFiNE config.json ConfigMap.
+config:
+  # Displayed server name.
+  serverName: AFFiNE Internal
+  # Public URL AFFiNE advertises (must match the routed host).
+  externalUrl: https://affine.dev.tbs.cloudeka.xyz

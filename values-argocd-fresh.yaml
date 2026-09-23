@@ -1,0 +1,34 @@
+# Argo CD fresh install with externally managed Secrets (secrets.mode=existing):
+# a pre-created db-affine-bootstrap credential Secret in prod and a pre-created
+# affine-database Secret in the application namespace. Because
+# databaseProvisioning creates the application role/database, DATABASE_URL can
+# only exist after it runs, so this overlay explicitly opts in to the bootstrap
+# Job patching that one key into affine-database. Nothing else in that Secret is
+# touched, and the chart does not own it.
+application:
+  enabled: true
+migration:
+  enabled: true
+databaseProvisioning:
+  enabled: true
+  database: affine
+  admin:
+    secretName: db-affine-bootstrap
+prerequisites:
+  enabled: true
+  database:
+    mode: everest
+    name: db-affine
+    namespace: prod
+    userSecretName: db-affine-bootstrap
+  redis:
+    enabled: true
+secrets:
+  mode: existing
+  database:
+    name: affine-database
+    allowBootstrapPatch: true
+  redis:
+    name: affine-redis
+routing:
+  mode: none

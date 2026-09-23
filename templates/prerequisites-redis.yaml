@@ -1,0 +1,68 @@
+{{- if and .Values.prerequisites.enabled .Values.prerequisites.redis.enabled }}
+{{- if .Values.prerequisites.redis.persistence.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "affine.redisClaimName" . }}
+  labels: {{- include "affine.redisLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    {{- if .Values.prerequisites.redis.persistence.retain }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.prerequisites.redis.storageClass }}
+  resources:
+    requests: {storage: {{ .Values.prerequisites.redis.storageSize }}}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.prerequisites.redis.name }}
+  labels: {{- include "affine.redisLabels" . | nindent 4 }}
+  annotations: {argocd.argoproj.io/sync-wave: "-1"}
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels: {{- include "affine.redisSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "affine.redisLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: redis
+          image: {{ .Values.prerequisites.redis.image }}
+          command: [sh, -c]
+          args: ['exec redis-server --requirepass "$REDIS_PASSWORD" --appendonly yes']
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_PASSWORD}}
+          ports: [{name: redis, containerPort: 6379}]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          readinessProbe: {tcpSocket: {port: redis}, periodSeconds: 10}
+          livenessProbe: {tcpSocket: {port: redis}, periodSeconds: 20}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts: [{name: data, mountPath: /data}]
+      volumes: [{name: data, persistentVolumeClaim: {claimName: {{ include "affine.redisClaimName" . }}}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.prerequisites.redis.name }}
+  labels: {{- include "affine.redisLabels" . | nindent 4 }}
+  annotations: {argocd.argoproj.io/sync-wave: "-1"}
+spec:
+  type: ClusterIP
+  selector: {{- include "affine.redisSelectorLabels" . | nindent 4 }}
+  ports: [{name: redis, port: 6379, targetPort: redis}]
+{{- end }}

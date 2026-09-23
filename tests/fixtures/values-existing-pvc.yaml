@@ -1,0 +1,30 @@
+# Static test fixture: externally managed PVCs (no PVC rendering).
+application:
+  enabled: true
+migration:
+  enabled: true
+persistence:
+  storage:
+    create: false
+    existingClaim: my-affine-storage
+  config:
+    create: false
+    existingClaim: my-affine-config
+prerequisites:
+  enabled: true
+  database:
+    mode: external
+  redis:
+    enabled: false
+    name: my-affine-redis
+secrets:
+  mode: existing
+  database:
+    name: my-affine-database
+    # existing mode does not read this value; kept as a documentation placeholder
+    data:
+      DATABASE_URL: "postgresql://<user>:<password>@database.example.invalid:5432/affine"
+  redis:
+    name: my-affine-redis
+routing:
+  mode: none

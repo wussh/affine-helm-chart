@@ -1,0 +1,43 @@
+# Static test fixture: chart-managed Secrets (secrets.mode=create) with everest
+# prerequisites and application database provisioning. Values are obvious
+# placeholders and must never be used anywhere real.
+application:
+  enabled: true
+migration:
+  enabled: true
+databaseProvisioning:
+  enabled: true
+  database: affine
+  admin:
+    secretName: db-affine-bootstrap
+prerequisites:
+  enabled: true
+  database:
+    mode: everest
+    name: db-affine
+    namespace: prod
+    userSecretName: db-affine-bootstrap
+    secret:
+      name: db-affine-bootstrap
+      username: test-user-placeholder
+      password: test-password-placeholder
+  redis:
+    enabled: true
+secrets:
+  mode: create
+  database:
+    name: affine-database
+    data:
+      POSTGRES_USERNAME: test-user-placeholder
+      POSTGRES_PASSWORD: test-password-placeholder
+      DATABASE_URL: ""
+  redis:
+    name: affine-redis
+    data:
+      REDIS_SERVER_HOST: affine-redis
+      REDIS_SERVER_PORT: "6379"
+      REDIS_SERVER_USERNAME: default
+      REDIS_SERVER_PASSWORD: test-redis-password-placeholder
+      REDIS_SERVER_DATABASE: "0"
+routing:
+  mode: none
