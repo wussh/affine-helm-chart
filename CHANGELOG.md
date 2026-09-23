@@ -1,5 +1,9 @@
 # Changelog
 
+Released versions are annotated git tags `vX.Y.Z` on `main`, each matching the
+section of the same number (see the release section of `README.md`). `0.1.0` and
+`0.2.0` predate the organisation repository and are kept here for history.
+
 ## 0.2.3
 
 - Optional Ingress TLS: `routing.ingress.tls.enabled` (default `true`). With
