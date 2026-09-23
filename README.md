@@ -8,6 +8,29 @@ Minimal Helm chart for self-hosted AFFiNE `0.27.4` (chart `0.2.3`).
 - [Operations guide](docs/operations.md)
 - [Platform-managed values example](examples/values-platform-managed.yaml)
 
+## Install from the public repository
+
+Released versions are published to a public Helm repository (Artifact Hub-ready):
+
+```bash
+helm repo add affine https://wussh.github.io/affine-helm-chart/
+helm repo update
+helm search repo affine/affine --versions
+
+helm install affine affine/affine --version 0.2.3 \
+  --namespace affine --create-namespace \
+  -f <your values file>
+```
+
+* Artifact Hub: add the repository URL `https://wussh.github.io/affine-helm-chart/`
+  on <https://artifacthub.io/>.
+* Every published package is built from the matching `vX.Y.Z` tag, so
+  `helm pull affine/affine --version 0.2.3` reproduces the tagged revision.
+* The chart is developed in a private organisation repository; the public
+  repository (`wussh/affine-helm-chart`) mirrors the released packages and keeps
+  `master` in step with the development tree. Pin the tag, not `master`, for
+  anything but local experiments.
+
 ## Requirements
 
 * Kubernetes 1.25+ (secret `optional` volumes, Jobs, PVCs)
