@@ -49,8 +49,9 @@ section of the same number (see the release section of `README.md`). `0.1.0` and
   2 × interval + 30`; bootstrap/provision/migration Job-name stability and
   rotation; PVC annotations; the Argo CD profile workload guard). A fresh install
   through Argo CD was verified end-to-end on `tbs-dev` — PreSync gate first,
-  migration against a real database, `Synced`/`Healthy` — and a second unchanged
-  sync recreated nothing.
+  migration against a real database, `Synced`/`Healthy` — and on a second
+  unchanged sync the migration Job and the application pod stayed untouched
+  (same UID, marker unchanged); only the PreSync gate hook re-ran, by design.
 
 ## 0.2.2
 
