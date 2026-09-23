@@ -17,9 +17,12 @@ helm repo add affine https://wussh.github.io/affine-helm-chart/
 helm repo update
 helm search repo affine/affine --versions
 
+# The default values deploy nothing, so start from an example and edit it.
+helm show values affine/affine --version 0.2.3 > ./my-values.yaml
+# (examples/ in the chart repository shows working dev and platform-owned sets)
 helm install affine affine/affine --version 0.2.3 \
   --namespace affine --create-namespace \
-  -f <your values file>
+  -f ./my-values.yaml
 ```
 
 * Artifact Hub: add the repository URL `https://wussh.github.io/affine-helm-chart/`
