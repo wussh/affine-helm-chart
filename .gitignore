@@ -6,3 +6,6 @@ __pycache__/
 .claude/
 .serena/
 
+# Deploy
+deploy/secrets/*.mgmt-jah1.yaml
+deploy/valkeyclusters/*.mgmt-jah1.yaml
