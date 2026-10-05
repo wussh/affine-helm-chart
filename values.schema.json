@@ -25,7 +25,7 @@
     "config"
   ],
   "properties": {
-    "replicaCount": {"type": "integer", "minimum": 1, "maximum": 1},
+    "replicaCount": {"type": "integer", "minimum": 1},
     "application": {
       "type": "object",
       "additionalProperties": false,
@@ -228,6 +228,7 @@
       }
     },
     "securityContext": {"type": "object"},
+    "affinity": {"type": "object"},
     "extraEnvFrom": {
       "type": "array",
       "items": {
@@ -301,12 +302,18 @@
         "gateway": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "namespace", "httpSectionName", "httpsSectionName"],
+          "required": ["name", "namespace", "httpSectionName", "httpsSectionName", "kgatewayCookieAffinity"],
           "properties": {
             "name": {"type": "string", "minLength": 1},
             "namespace": {"type": "string", "minLength": 1},
             "httpSectionName": {"type": "string", "minLength": 1},
-            "httpsSectionName": {"type": "string", "minLength": 1}
+            "httpsSectionName": {"type": "string", "minLength": 1},
+            "kgatewayCookieAffinity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled"],
+              "properties": {"enabled": {"type": "boolean"}}
+            }
           }
         }
       }
@@ -343,10 +350,11 @@
     "affineClaim": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["create", "existingClaim", "retain", "size", "storageClass", "annotations"],
+      "required": ["create", "existingClaim", "accessMode", "retain", "size", "storageClass", "annotations"],
       "properties": {
         "create": {"type": "boolean"},
         "existingClaim": {"type": "string"},
+        "accessMode": {"enum": ["ReadWriteOnce", "ReadWriteMany"]},
         "retain": {"type": "boolean"},
         "size": {"type": "string", "minLength": 1},
         "storageClass": {"type": "string", "minLength": 1},

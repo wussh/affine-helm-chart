@@ -72,11 +72,15 @@ assert_render() { # desc assert flags...
 echo "# static: lint"
 expect_ok "lint default values" helm lint --strict "$CHART"
 expect_ok "lint examples/values-dev.yaml" helm lint --strict "$CHART" -f "$DEV"
+expect_ok "lint three-replicas example" helm lint --strict "$CHART" -f "$DEV" -f "$CHART/examples/values-three-replicas.yaml"
 expect_ok "lint everest existing fixture" helm lint --strict "$CHART" -f "$FIX/values-everest-existing.yaml"
 expect_ok "lint everest create fixture" helm lint --strict "$CHART" -f "$FIX/values-everest-create.yaml"
 expect_ok "lint existing-pvc fixture" helm lint --strict "$CHART" -f "$FIX/values-existing-pvc.yaml"
 expect_ok "lint: platform-managed example" helm lint "$CHART" -f "$CHART/examples/values-platform-managed.yaml" --strict
 expect_ok "lint: argocd platform-managed example" helm lint "$CHART" -f "$CHART/examples/values-argocd-platform-managed.yaml" --strict
+expect_ok "lint: argocd three-replicas overlay" helm lint "$CHART" \
+  -f "$CHART/examples/values-argocd-platform-managed.yaml" \
+  -f "$CHART/examples/values-argocd-three-replicas.yaml" --strict
 
 echo "# static: default values render nothing (safe, intentionally incomplete)"
 if [ -n "$(helm template affine-default "$CHART" -n affine-tests 2>"$TMP/err")" ]; then
@@ -90,6 +94,11 @@ render affine-dev "$CHART" -n affine-dev -f "$DEV" &&
   assert_render "dev: waits, secrets, PVCs, labels, selectors" \
     --release affine-dev --workloads --bootstrap --secrets --no-databasecluster \
     --selector-compat --job-ttl-absent --gate-absent \
+    --replicas 1 --no-affinity --migration-config-emptydir --policy-absent --no-httproute \
+    --pvc-access-mode -storage=ReadWriteOnce \
+    --pvc-access-mode -config=ReadWriteOnce \
+    --pvc-access-mode -redis=ReadWriteOnce \
+    --pvc-access-mode -postgres-data=ReadWriteOnce \
     --pvc-names affine-dev-storage,affine-dev-config,affine-redis,affine-postgres-data
 
 # The chart's default values deploy nothing; a profile that forgets to enable
@@ -390,14 +399,97 @@ expect_fail_msg "reject database.existing=true with mode=container" "only meanin
     --set prerequisites.database.existing=true \
     --set prerequisites.database.mode=container
 
-echo "# static: ReadWriteOnce single-replica guard and extraEnvFrom"
-# The schema rejects replicaCount>1 first. The template-level guard is the
-# explicit message for renders that bypass schema validation, and it must name
-# the real reason (ReadWriteOnce claims, no multi-replica coordination).
-expect_fail_msg "reject replicaCount>1 (schema)" "replicaCount" \
-  helm template t "$CHART" -f "$DEV" --set replicaCount=2
-expect_fail_msg "reject replicaCount>1 with an explicit ReadWriteOnce message" "ReadWriteOnce" \
+echo "# static: multi-replica opt-in contract"
+# replicaCount>1 is no longer schema-blocked. The template guard names the exact
+# missing requirement and must also work with --skip-schema-validation.
+expect_fail_msg "reject replicaCount=0 (schema)" "replicaCount" \
+  helm template t "$CHART" -f "$DEV" --set replicaCount=0
+expect_fail_msg "reject non-enum accessMode (schema)" "accessMode" \
+  helm template t "$CHART" -f "$DEV" --set persistence.storage.accessMode=ReadWriteOncePod
+expect_fail_msg "reject multi-replica with ReadWriteOnce storage" "persistence.storage.accessMode=ReadWriteMany" \
   helm template t "$CHART" -f "$DEV" --set replicaCount=2 --skip-schema-validation
+expect_fail_msg "reject multi-replica with ReadWriteOnce config" "persistence.config.accessMode=ReadWriteMany" \
+  helm template t "$CHART" -f "$DEV" --set replicaCount=2 \
+    --set persistence.storage.accessMode=ReadWriteMany --skip-schema-validation
+expect_fail_msg "reject multi-replica without the migration gate" "migration.enabled=true" \
+  helm template t "$CHART" -f "$DEV" --set replicaCount=2 \
+    --set persistence.storage.accessMode=ReadWriteMany \
+    --set persistence.config.accessMode=ReadWriteMany \
+    --set migration.enabled=false --skip-schema-validation
+expect_fail_msg "reject multi-replica on ingress (no affinity implementation)" "routing.mode=ingress" \
+  helm template t "$CHART" -f "$DEV" --set replicaCount=2 \
+    --set persistence.storage.accessMode=ReadWriteMany \
+    --set persistence.config.accessMode=ReadWriteMany \
+    --set routing.mode=ingress --skip-schema-validation
+expect_fail_msg "reject gateway routing without cookie affinity" "kgatewayCookieAffinity.enabled=true" \
+  helm template t "$CHART" -f "$DEV" --set replicaCount=2 \
+    --set persistence.storage.accessMode=ReadWriteMany \
+    --set persistence.config.accessMode=ReadWriteMany \
+    --set routing.mode=gateway --skip-schema-validation
+expect_fail_msg "reject gateway cookie affinity with a non-HTTPS externalUrl" "HTTPS" \
+  helm template t "$CHART" -f "$DEV" --set replicaCount=2 \
+    --set persistence.storage.accessMode=ReadWriteMany \
+    --set persistence.config.accessMode=ReadWriteMany \
+    --set routing.mode=gateway \
+    --set routing.gateway.kgatewayCookieAffinity.enabled=true --skip-schema-validation
+expect_fail_msg "reject cookie-affinity flag with a single replica" "replicaCount>1" \
+  helm template t "$CHART" -f "$DEV" \
+    --set routing.gateway.kgatewayCookieAffinity.enabled=true --skip-schema-validation
+expect_fail_msg "reject cookie-affinity flag with ingress mode" "routing.mode=ingress" \
+  helm template t "$CHART" -f "$DEV" \
+    --set routing.mode=ingress \
+    --set routing.gateway.kgatewayCookieAffinity.enabled=true --skip-schema-validation
+
+render affine-multi "$CHART" -n affine-multi -f "$DEV" \
+    --set replicaCount=3 \
+    --set persistence.storage.accessMode=ReadWriteMany \
+    --set persistence.config.accessMode=ReadWriteMany &&
+  assert_render "multi-replica: 3 replicas, RWX app claims, config PVC in migration Job, single Job" \
+    --release affine-multi --workloads --replicas 3 \
+    --pvc-access-mode -storage=ReadWriteMany \
+    --pvc-access-mode -config=ReadWriteMany \
+    --pvc-access-mode -redis=ReadWriteOnce \
+    --pvc-access-mode -postgres-data=ReadWriteOnce \
+    --migration-config-pvc --selector-compat --gate-absent --no-affinity
+
+render affine-multi "$CHART" -n affine-multi -f "$DEV" -f "$CHART/examples/values-three-replicas.yaml" &&
+  assert_render "three-replica overlay: anti-affinity spread, RWX claims, config PVC" \
+    --release affine-multi --replicas 3 --affinity-hostname --migration-config-pvc \
+    --pvc-access-mode -storage=ReadWriteMany \
+    --pvc-access-mode -config=ReadWriteMany
+
+echo "# static: kgateway affinity policy"
+# routing.mode=none + flag: the policy is staged (so it can be verified before
+# a route exists) and no HTTPRoute is rendered.
+render affine-multi "$CHART" -n affine-multi -f "$DEV" \
+    --set replicaCount=3 \
+    --set persistence.storage.accessMode=ReadWriteMany \
+    --set persistence.config.accessMode=ReadWriteMany \
+    --set routing.gateway.kgatewayCookieAffinity.enabled=true &&
+  assert_render "multi-replica preflight: affinity policy staged, no HTTPRoute" \
+    --release affine-multi --replicas 3 --policy-affinity --no-httproute
+# routing.mode=gateway with the flag and an HTTPS externalUrl: policy + route.
+render affine-gw "$CHART" -n affine-gw -f "$DEV" \
+    --set replicaCount=3 \
+    --set persistence.storage.accessMode=ReadWriteMany \
+    --set persistence.config.accessMode=ReadWriteMany \
+    --set routing.mode=gateway \
+    --set routing.gateway.kgatewayCookieAffinity.enabled=true \
+    --set config.externalUrl=https://affine.example.test &&
+  assert_render "multi-replica gateway: policy and HTTPRoute rendered" \
+    --release affine-gw --replicas 3 --policy-affinity --httproute-present
+# Argo CD platform-managed profile with external PostgreSQL/Redis, 3 replicas
+# and the policy staged in mode none.
+render affine-argocd "$CHART" -n affine-argocd \
+    -f "$CHART/examples/values-argocd-platform-managed.yaml" \
+    -f "$CHART/examples/values-argocd-three-replicas.yaml" &&
+  assert_render "argocd three-replica overlay: staged policy, gate, no bootstrap" \
+    --release affine-argocd --replicas 3 --policy-affinity --no-httproute \
+    --gate-present --no-bootstrap --migration-config-pvc \
+    --pvc-access-mode -storage=ReadWriteMany \
+    --pvc-access-mode -config=ReadWriteMany
+
+echo "# static: extraEnvFrom"
 render affine-tests "$CHART" -n affine-tests -f "$FIX/values-everest-existing.yaml" \
     --set extraEnvFrom[0].configMapRef.name=affine-extra-config &&
   assert_render "extraEnvFrom is rendered on the application container" \
@@ -572,6 +664,254 @@ if [ "${AFFINE_CLUSTER_TEST:-0}" = "1" ]; then
     "${KCTL[@]}" -n "$NS" delete pvc --all --wait=false >/dev/null 2>&1 || true
     "${KCTL[@]}" delete namespace "$NS" --wait=false >/dev/null 2>&1 || true
     ok "cluster: cleanup requested (PVCs and namespace deletion)"
+  fi
+fi
+
+if [ "${AFFINE_CLUSTER_MULTI_TEST:-0}" = "1" ]; then
+  echo "# cluster multi: 3 replicas over shared RWX claims (isolated namespace)"
+  # Opt-in, separate from the single-replica cluster path:
+  #   AFFINE_CLUSTER_MULTI_TEST=1 \
+  #   AFFINE_CLUSTER_MULTI_CONTEXT=tbs-dev \
+  #   AFFINE_CLUSTER_MULTI_NAMESPACE=affine-multi-test \
+  #   AFFINE_CLUSTER_MULTI_RELEASE=affine-multi-test \
+  #   ./tests/chart-tests.sh
+  # Never point this at an existing release: ReadWriteOnce claims cannot be
+  # switched in place, and the trial writes to the dev container database.
+  MULTI_CTX="${AFFINE_CLUSTER_MULTI_CONTEXT:-${AFFINE_CLUSTER_CONTEXT:-}}"
+  MULTI_NS="${AFFINE_CLUSTER_MULTI_NAMESPACE:-affine-multi-test}"
+  MULTI_REL="${AFFINE_CLUSTER_MULTI_RELEASE:-affine-multi-test}"
+  MULTI_VALUES=(-f "$DEV" -f "$CHART/examples/values-three-replicas.yaml")
+  MHELM=(helm)
+  MKCTL=(kubectl)
+  if [ -n "$MULTI_CTX" ]; then
+    MHELM=(helm --kube-context "$MULTI_CTX")
+    MKCTL=(kubectl --context "$MULTI_CTX")
+  fi
+
+  # Pod rows for the AFFiNE Deployment only: the bootstrap/migration Job pods
+  # also carry app.kubernetes.io/name=affine, and terminating pods linger during
+  # a rollout. Fields: name|node|deletionTimestamp|ownerKind|uid|readyStatus.
+  deploy_pod_rows() {
+    "${MKCTL[@]}" -n "$MULTI_NS" get pods -l app.kubernetes.io/name=affine \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.nodeName}{"|"}{.metadata.deletionTimestamp}{"|"}{.metadata.ownerReferences[0].kind}{"|"}{.metadata.uid}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>/dev/null
+  }
+  # Ready, non-terminating pods owned by the Deployment's ReplicaSet.
+  deploy_pod_rows_ready() {
+    deploy_pod_rows | awk -F'|' '$3 == "" && $4 == "ReplicaSet" && $6 == "True"'
+  }
+  running_pods() { deploy_pod_rows_ready | awk -F'|' '{print $1}'; }
+  deploy_pod_uids() { deploy_pod_rows_ready | awk -F'|' '{print $5}' | sort; }
+  ready_pods() { deploy_pod_rows_ready | grep -c . || true; }
+  distinct_nodes() { deploy_pod_rows_ready | awk -F'|' '{print $2}' | sort -u | grep -c . || true; }
+  to_epoch() { date -u -d "$1" +%s 2>/dev/null || echo 0; }
+  check_key_hashes() { # desc
+    local desc="$1" pod h unique hashes=()
+    while read -r pod; do
+      [ -z "$pod" ] && continue
+      h="$("${MKCTL[@]}" -n "$MULTI_NS" exec "$pod" -- sh -c \
+        'sha256sum "$HOME/.affine/config/private.key" 2>/dev/null | cut -d" " -f1')"
+      hashes+=("$h")
+    done < <(running_pods)
+    unique="$(printf '%s\n' "${hashes[@]}" | sort -u | grep -c . || true)"
+    if [ "${#hashes[@]}" -eq 3 ] && [ "$unique" -eq 1 ] && [ -n "${hashes[0]}" ]; then
+      ok "cluster multi: private.key digest identical in 3 pods ($desc)"
+    else
+      bad "cluster multi: private.key missing or divergent ($desc; pods=${#hashes[@]}, distinct=$unique)"
+    fi
+  }
+
+  if "${MHELM[@]}" status "$MULTI_REL" -n "$MULTI_NS" >/dev/null 2>&1; then
+    bad "cluster multi: release $MULTI_REL already exists in $MULTI_NS; refusing to reuse it (RWO claims cannot be switched in place)"
+  else
+    expect_ok "cluster multi: fresh install (3 replicas, RWX claims)" \
+      "${MHELM[@]}" upgrade --install "$MULTI_REL" "$CHART" \
+        -n "$MULTI_NS" --create-namespace "${MULTI_VALUES[@]}" \
+        --wait --wait-for-jobs --timeout 15m
+
+    for claim in storage config; do
+      phase_mode="$("${MKCTL[@]}" -n "$MULTI_NS" get pvc "$MULTI_REL-$claim" \
+        -o jsonpath='{.status.phase} {.spec.accessModes[0]}' 2>/dev/null || true)"
+      if [ "$phase_mode" = "Bound ReadWriteMany" ]; then
+        ok "cluster multi: PVC $MULTI_REL-$claim is Bound ReadWriteMany"
+      else
+        bad "cluster multi: PVC $MULTI_REL-$claim is '$phase_mode' (want 'Bound ReadWriteMany')"
+      fi
+    done
+
+    if [ "$(ready_pods)" -eq 3 ] && [ "$(distinct_nodes)" -eq 3 ]; then
+      ok "cluster multi: 3 pods Ready on 3 distinct nodes"
+    else
+      bad "cluster multi: ready=$(ready_pods) nodes=$(distinct_nodes) (want 3 Ready on 3 nodes)"
+    fi
+
+    mig_names="$("${MKCTL[@]}" -n "$MULTI_NS" get job -o name 2>/dev/null | grep -- '-migration-' || true)"
+    mig_name="${mig_names#*/}"
+    if [ "$(printf '%s\n' "$mig_names" | grep -c -- '-migration-')" -eq 1 ] &&
+       [ "$("${MKCTL[@]}" -n "$MULTI_NS" get job "$mig_name" -o jsonpath='{.status.succeeded}')" = "1" ]; then
+      ok "cluster multi: exactly one migration Job, succeeded"
+    else
+      bad "cluster multi: migration Job state unexpected (jobs: ${mig_names:-none})"
+    fi
+
+    # Gate evidence, observed per pod: the wait-migration init container must
+    # have terminated successfully before the affine container started, and the
+    # migration Job must have completed before the pod reported Ready. (The gate
+    # can observe the marker a few seconds before the Job controller records
+    # completionTime, so compare the Job against Ready, not against the affine
+    # container start.)
+    completion="$("${MKCTL[@]}" -n "$MULTI_NS" get job "$mig_name" -o jsonpath='{.status.completionTime}' 2>/dev/null)"
+    gate_ok=1
+    job_before_ready=1
+    pods_checked=0
+    while read -r pod; do
+      [ -z "$pod" ] && continue
+      pods_checked=$((pods_checked + 1))
+      init_exit="$("${MKCTL[@]}" -n "$MULTI_NS" get pod "$pod" \
+        -o jsonpath='{.status.initContainerStatuses[?(@.name=="wait-migration")].state.terminated.exitCode}' 2>/dev/null)"
+      init_fin="$("${MKCTL[@]}" -n "$MULTI_NS" get pod "$pod" \
+        -o jsonpath='{.status.initContainerStatuses[?(@.name=="wait-migration")].state.terminated.finishedAt}' 2>/dev/null)"
+      started="$("${MKCTL[@]}" -n "$MULTI_NS" get pod "$pod" \
+        -o jsonpath='{.status.containerStatuses[?(@.name=="affine")].state.running.startedAt}' 2>/dev/null)"
+      ready_at="$("${MKCTL[@]}" -n "$MULTI_NS" get pod "$pod" \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].lastTransitionTime}' 2>/dev/null)"
+      if [ "$init_exit" != "0" ] || [ -z "$init_fin" ] || [ -z "$started" ] ||
+         [ "$(to_epoch "$started")" -lt "$(to_epoch "$init_fin")" ]; then
+        gate_ok=0
+      fi
+      if [ -z "$completion" ] || [ -z "$ready_at" ] ||
+         [ "$(to_epoch "$completion")" -gt "$(to_epoch "$ready_at")" ]; then
+        job_before_ready=0
+      fi
+    done < <(running_pods)
+    # A missing pod set must fail these checks instead of passing vacuously.
+    if [ "$pods_checked" -ne 3 ]; then
+      gate_ok=0
+      job_before_ready=0
+    fi
+    [ "$gate_ok" -eq 1 ] &&
+      ok "cluster multi: wait-migration gate passed before every affine container started" ||
+      bad "cluster multi: wait-migration gate missing or affine container started before it finished"
+    [ "$job_before_ready" -eq 1 ] &&
+      ok "cluster multi: migration Job completed before the pods reported Ready" ||
+      bad "cluster multi: migration Job did not complete before the pods reported Ready"
+
+    events="$("${MKCTL[@]}" -n "$MULTI_NS" get events \
+      -o jsonpath='{range .items[*]}{.reason}{" "}{.message}{"\n"}{end}' 2>/dev/null || true)"
+    if printf '%s' "$events" | grep -qiE "Multi-Attach|FailedAttachVolume"; then
+      bad "cluster multi: volume attach errors in events"
+      printf '%s\n' "$events" | grep -iE "Multi-Attach|FailedAttachVolume" | head -5
+    else
+      ok "cluster multi: no Multi-Attach / FailedAttachVolume events"
+    fi
+
+    check_key_hashes "after install"
+
+    pvc_before="$("${MKCTL[@]}" -n "$MULTI_NS" get pvc \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.uid}{"\n"}{end}' 2>/dev/null | sort)"
+    pods_before="$(deploy_pod_uids)"
+    mig_uid_before="$("${MKCTL[@]}" -n "$MULTI_NS" get job "$mig_name" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+
+    expect_ok "cluster multi: identical upgrade" \
+      "${MHELM[@]}" upgrade --install "$MULTI_REL" "$CHART" -n "$MULTI_NS" \
+        "${MULTI_VALUES[@]}" --wait --wait-for-jobs --timeout 15m
+
+    pvc_after="$("${MKCTL[@]}" -n "$MULTI_NS" get pvc \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.uid}{"\n"}{end}' 2>/dev/null | sort)"
+    pods_after="$(deploy_pod_uids)"
+    [ -n "$pvc_before" ] && [ "$pvc_before" = "$pvc_after" ] &&
+      ok "cluster multi: PVCs not recreated by identical upgrade" ||
+      bad "cluster multi: PVCs recreated or missing after identical upgrade"
+    [ -n "$pods_before" ] && [ "$pods_before" = "$pods_after" ] &&
+      ok "cluster multi: pods not restarted by identical upgrade" ||
+      bad "cluster multi: pods restarted by identical upgrade"
+    [ -n "$mig_uid_before" ] &&
+      [ "$mig_uid_before" = "$("${MKCTL[@]}" -n "$MULTI_NS" get job "$mig_name" -o jsonpath='{.metadata.uid}')" ] &&
+      ok "cluster multi: migration Job not recreated by identical upgrade" ||
+      bad "cluster multi: migration Job recreated by identical upgrade"
+
+    expect_ok "cluster multi: migration PodTemplate change" \
+      "${MHELM[@]}" upgrade --install "$MULTI_REL" "$CHART" -n "$MULTI_NS" \
+        "${MULTI_VALUES[@]}" --set migrationResources.limits.memory=3Gi \
+        --wait --wait-for-jobs --timeout 15m
+    mig_name_new="$("${MKCTL[@]}" -n "$MULTI_NS" get job -o name 2>/dev/null | grep -- '-migration-' | head -1)"
+    mig_name_new="${mig_name_new#*/}"
+    [ -n "$mig_name_new" ] && [ "$mig_name_new" != "$mig_name" ] &&
+      ok "cluster multi: PodTemplate change rotated the migration Job" ||
+      bad "cluster multi: PodTemplate change did not rotate the migration Job"
+    [ "$("${MKCTL[@]}" -n "$MULTI_NS" get job "$mig_name_new" -o jsonpath='{.status.succeeded}')" = "1" ] &&
+      ok "cluster multi: rotated migration Job completed" ||
+      bad "cluster multi: rotated migration Job did not complete"
+    [ "$("${MKCTL[@]}" -n "$MULTI_NS" get job -o name 2>/dev/null | grep -c -- '-migration-')" -eq 1 ] &&
+      ok "cluster multi: superseded migration Job replaced, not accumulated" ||
+      bad "cluster multi: migration Job count after rotation is not 1"
+
+    mig_uid_new="$("${MKCTL[@]}" -n "$MULTI_NS" get job "$mig_name_new" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+    expect_ok "cluster multi: repeated upgrade after PodTemplate change" \
+      "${MHELM[@]}" upgrade --install "$MULTI_REL" "$CHART" -n "$MULTI_NS" \
+        "${MULTI_VALUES[@]}" --set migrationResources.limits.memory=3Gi \
+        --wait --wait-for-jobs --timeout 15m
+    [ -n "$mig_uid_new" ] &&
+      [ "$mig_uid_new" = "$("${MKCTL[@]}" -n "$MULTI_NS" get job "$mig_name_new" -o jsonpath='{.metadata.uid}')" ] &&
+      ok "cluster multi: reconcile did not recreate the rotated Job" ||
+      bad "cluster multi: reconcile recreated the rotated Job"
+
+    if [ "${AFFINE_CLUSTER_MULTI_POLICY:-1}" = "1" ]; then
+      # Stage the kgateway affinity policy with routing.mode=none: the policy
+      # must be Accepted before the HTTPRoute is opened, and adding it must not
+      # restart the application pods. This runs before the rolling restart: a
+      # later `helm upgrade` removes kubectl's restartedAt annotation and would
+      # trigger another rollout, which would look like a policy-caused restart.
+      pods_before_policy="$(deploy_pod_uids)"
+      # Keep the deliberate migration override from the previous step: dropping
+      # it would change the migration marker and therefore legitimately rotate
+      # the Deployment's wait-migration gate (new pods), which the check below
+      # would misread as a policy-caused restart. The only delta here is the
+      # affinity flag.
+      expect_ok "cluster multi: stage affinity policy (routing.mode=none)" \
+        "${MHELM[@]}" upgrade --install "$MULTI_REL" "$CHART" -n "$MULTI_NS" \
+          "${MULTI_VALUES[@]}" --set migrationResources.limits.memory=3Gi \
+          --set routing.gateway.kgatewayCookieAffinity.enabled=true \
+          --wait --timeout 10m
+      pods_after_policy="$(deploy_pod_uids)"
+      [ -n "$pods_before_policy" ] && [ "$pods_before_policy" = "$pods_after_policy" ] &&
+        ok "cluster multi: policy staged without restarting pods" ||
+        bad "cluster multi: policy staging restarted pods"
+
+      policy_conditions() {
+        "${MKCTL[@]}" -n "$MULTI_NS" get backendconfigpolicy "$MULTI_REL-affinity" \
+          -o jsonpath='{range .status.ancestors[*].conditions[*]}{.type}={.status}{" "}{end}' 2>/dev/null
+      }
+      st=""
+      for _ in $(seq 1 12); do
+        st="$(policy_conditions)"
+        case "$st" in *"Accepted=True"*) break ;; esac
+        sleep 5
+      done
+      case "$st" in
+        *"Accepted=True"*) ok "cluster multi: affinity policy Accepted=True" ;;
+        *) bad "cluster multi: affinity policy not accepted (conditions: ${st:-none})" ;;
+      esac
+      case "$st" in
+        *"Attached=True"*) ok "cluster multi: affinity policy Attached=True" ;;
+        *) bad "cluster multi: affinity policy not attached (conditions: ${st:-none})" ;;
+      esac
+    fi
+
+    expect_ok "cluster multi: rolling restart" \
+      "${MKCTL[@]}" -n "$MULTI_NS" rollout restart "deploy/$MULTI_REL"
+    expect_ok "cluster multi: rollout status" \
+      "${MKCTL[@]}" -n "$MULTI_NS" rollout status "deploy/$MULTI_REL" --timeout=10m
+    if [ "$(ready_pods)" -eq 3 ] && [ "$(distinct_nodes)" -eq 3 ]; then
+      ok "cluster multi: 3 pods Ready on 3 distinct nodes after rolling restart"
+    else
+      bad "cluster multi: ready=$(ready_pods) nodes=$(distinct_nodes) after rolling restart"
+    fi
+    check_key_hashes "after rolling restart"
+
+    if [ "${AFFINE_CLUSTER_MULTI_CLEANUP:-1}" = "1" ]; then
+      "${MKCTL[@]}" delete namespace "$MULTI_NS" --wait=false >/dev/null 2>&1 || true
+      ok "cluster multi: cleanup requested (namespace $MULTI_NS deletion)"
+    fi
   fi
 fi
 

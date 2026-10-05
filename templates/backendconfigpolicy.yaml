@@ -1,0 +1,40 @@
+{{- if and .Values.application.enabled (gt (int .Values.replicaCount) 1) .Values.routing.gateway.kgatewayCookieAffinity.enabled }}
+{{- /*
+kgateway consistent-hash session affinity for multi-replica AFFiNE.
+
+AFFiNE clients fall back to Socket.IO HTTP polling, so requests from one browser
+session must reach the same replica while a session is live. The cookie hash
+policy below makes Envoy generate `affine-route-affinity` and hash on it;
+`terminal: true` stops further policy evaluation once the cookie is present.
+`ttl: 0s` is a browser-session cookie (no Max-Age). `secure: true` requires the
+HTTPS route the multi-replica guard enforces for routing.mode=gateway.
+
+Rendered whenever the flag is on and replicaCount>1, including with
+routing.mode=none so the policy can be staged and verified before the HTTPRoute
+is opened. Consistent hashing is soft affinity: adding/removing backends or an
+Envoy restart can remap a session; clients reconnect and shared PostgreSQL,
+Redis and RWX storage keep data consistent.
+*/}}
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: BackendConfigPolicy
+metadata:
+  name: {{ include "affine.fullname" . }}-affinity
+  labels: {{- include "affine.labels" . | nindent 4 }}
+  annotations: {argocd.argoproj.io/sync-wave: "3"}
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: {{ include "affine.fullname" . }}
+  loadBalancer:
+    ringHash:
+      hashPolicies:
+        - cookie:
+            name: affine-route-affinity
+            path: /
+            ttl: 0s
+            httpOnly: true
+            secure: true
+            sameSite: Lax
+          terminal: true
+{{- end }}
