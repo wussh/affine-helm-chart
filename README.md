@@ -424,7 +424,7 @@ never a branch.
 
 | Tag | Commit | Highlights |
 | --- | --- | --- |
-| `v0.2.4` | _(release commit)_ | Opt-in `replicaCount>1` (RWX claims, shared config PVC for `private.key`, anti-affinity), `persistence.*.accessMode`, kgateway `BackendConfigPolicy` cookie affinity, three-replica examples, multi-replica cluster trial path |
+| `v0.2.4` | `0aaf86f` | Opt-in `replicaCount>1` (RWX claims, shared config PVC for `private.key`, anti-affinity), `persistence.*.accessMode`, kgateway `BackendConfigPolicy` cookie affinity, three-replica examples, multi-replica cluster trial path |
 | `v0.2.3` | `7191896f` | Optional Ingress TLS (`routing.ingress.tls.enabled`), Argo CD `PreSync` database gate, Job-name checksums for all three Jobs, PVC annotations, `examples/values-argocd-platform-managed.yaml` |
 | `v0.2.2` | `d10856ad` | Safe-by-default Job retention (`jobRetentionSeconds: 0`), full PodTemplate checksum for the migration Job, ReadWriteOnce single-replica guard, `extraEnvFrom`, Profile A values |
 | `v0.2.1` | `1820d743` | Chart as imported into the organisation repository (the four lifecycle fixes are described in the `0.2.1` section of `CHANGELOG.md`) |
