@@ -197,7 +197,7 @@ Required controls:
 
 ### Isolated restore drill
 
-1. Create an isolated target namespace, database target, Redis instance, and temporary hostname. The chart fixes `replicaCount` at `1`; use the feature flags below for baseline inspection. Never use production Redis, hostname, or database during the drill.
+1. Create an isolated target namespace, database target, Redis instance, and temporary hostname. The drill runs one replica (`replicaCount` defaults to `1`); multi-replica needs two ReadWriteMany claims and a three-node spread, so do not scale the drill target. Use the feature flags below for baseline inspection. Never use production Redis, hostname, or database during the drill.
 2. Restore PostgreSQL first through the supported Everest workflow into the isolated database target.
 3. Restore matching `storage` and `config` snapshots into explicitly named PVCs. Configure `persistence.*.create=false` and `existingClaim` so Helm does not create empty replacement claims.
 4. Create temporary namespace-local runtime Secrets that point only to the restored database and isolated Redis; never export source Secrets into the drill record.

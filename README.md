@@ -1,6 +1,6 @@
 # AFFiNE Helm Chart
 
-Minimal Helm chart for self-hosted AFFiNE `0.27.4` (chart `0.2.3`).
+Minimal Helm chart for self-hosted AFFiNE `0.27.4` (chart `0.2.4`).
 
 ## Documentation
 
@@ -18,9 +18,9 @@ helm repo update
 helm search repo affine/affine --versions
 
 # The default values deploy nothing, so start from an example and edit it.
-helm show values affine/affine --version 0.2.3 > ./my-values.yaml
+helm show values affine/affine --version 0.2.4 > ./my-values.yaml
 # (examples/ in the chart repository shows working dev and platform-owned sets)
-helm install affine affine/affine --version 0.2.3 \
+helm install affine affine/affine --version 0.2.4 \
   --namespace affine --create-namespace \
   -f ./my-values.yaml
 ```
@@ -28,7 +28,7 @@ helm install affine affine/affine --version 0.2.3 \
 * Artifact Hub: add the repository URL `https://wussh.github.io/affine-helm-chart/`
   on <https://artifacthub.io/>.
 * Every published package is built from the matching `vX.Y.Z` tag, so
-  `helm pull affine/affine --version 0.2.3` reproduces the tagged revision.
+  `helm pull affine/affine --version 0.2.4` reproduces the tagged revision.
 * The chart is developed in a private organisation repository; the public
   repository (`wussh/affine-helm-chart`) mirrors the released packages and keeps
   `master` in step with the development tree. Pin the tag, not `master`, for
@@ -146,7 +146,7 @@ keep Argo CD self-heal and prune disabled for initial adoption.
 
 The bootstrap script uses `kubectl patch --type=merge --patch-file` for `.data.DATABASE_URL`, never `kubectl apply` or `create secret | apply`. It normally preserves unrelated Secret keys, writes temporary data with `umask 077`, and verifies the patched URL by SHA-256 without printing it. Its RBAC authority remains whole-object `patch`/`update`, and it may remove the legacy annotation described above.
 
-## Verified semantics (chart 0.2.3)
+## Verified semantics (chart 0.2.4)
 
 * `jobRetentionSeconds: 0` renders no `ttlSecondsAfterFinished` field and keeps
   completed Jobs (bootstrap, database-provision, migration).
@@ -169,11 +169,34 @@ The bootstrap script uses `kubectl patch --type=merge --patch-file` for `.data.D
   so chart-rendered RBAC would not exist yet on the first sync.
 * `persistence.storage.annotations` / `persistence.config.annotations` add
   annotations to the chart-rendered claims.
-* AFFiNE stores data on ReadWriteOnce claims, so exactly one replica is
-  supported. `replicaCount` is schema-pinned to `1`; a render that bypasses
-  schema validation fails with an explicit `replicaCount=... is not supported:
-  AFFiNE stores data on ReadWriteOnce claims (persistence.storage/config) and
-  has no multi-replica coordination.` message.
+* `replicaCount` defaults to `1`. Values > 1 are an explicit opt-in and must
+  satisfy the full contract or the render fails naming the missing requirement
+  (also with `--skip-schema-validation`): `application.enabled=true`,
+  `migration.enabled=true`, and `persistence.storage.accessMode` /
+  `persistence.config.accessMode` both `ReadWriteMany`. With `create=false`
+  `accessMode` is the operator's assertion about the pre-created claim; the
+  schema cannot inspect a live PVC. `routing.mode=ingress` is rejected for
+  multi-replica; `routing.mode=gateway` requires
+  `routing.gateway.kgatewayCookieAffinity.enabled=true` and an HTTPS
+  `config.externalUrl`; `routing.mode=none` is allowed (internal trial, or
+  staging the affinity policy before opening a route).
+* With `replicaCount>1` the migration Job mounts the **config** claim: the
+  single predeploy run writes/keeps `private.key` on the shared volume every
+  replica mounts. The Job's `storage` volume stays an `emptyDir`, and with one
+  replica both Job volumes stay `emptyDir` as before.
+* `routing.gateway.kgatewayCookieAffinity.enabled=true` renders a
+  `gateway.kgateway.dev/v1alpha1 BackendConfigPolicy` that attaches a
+  consistent-hash cookie to the AFFiNE Service (`affine-route-affinity`,
+  `Secure`, `HttpOnly`, `SameSite=Lax`, session TTL `0s`, `terminal: true`).
+  Consistent hashing is soft affinity: a backend-set change or an Envoy restart
+  can remap a Socket.IO polling session; clients reconnect and shared
+  PostgreSQL, Redis and RWX storage keep data consistent. The flag is rejected
+  with a single replica and with `routing.mode=ingress`. This is an
+  operator-tested topology, not an upstream-supported AFFiNE HA claim.
+* `examples/values-three-replicas.yaml` (dev overlay) and
+  `examples/values-argocd-three-replicas.yaml` (platform-managed overlay) carry
+  the 3-replica trial sets, including pod anti-affinity on
+  `kubernetes.io/hostname`.
 * `secrets.mode: existing` is read-only: the chart renders, patches, annotates,
   and deletes no Secret, and no Role grants a write verb on the database or
   Redis Secret. `secrets.database.allowBootstrapPatch=true` is the single
@@ -337,7 +360,7 @@ pinning, Secret lifecycle, PVC lifecycle, DatabaseCluster retention, bootstrap
 patch hygiene, Ingress TLS toggle, Argo CD database gate, Job-name stability and
 rotation).
 
-All four value profiles are lint-covered; run them explicitly when changing
+Every example profile is lint-covered; run them explicitly when changing
 values or schema:
 
 ```bash
@@ -345,6 +368,8 @@ helm lint . --strict
 helm lint . --strict -f examples/values-dev.yaml
 helm lint . --strict -f examples/values-platform-managed.yaml
 helm lint . --strict -f examples/values-argocd-platform-managed.yaml
+helm lint . --strict -f examples/values-dev.yaml -f examples/values-three-replicas.yaml
+helm lint . --strict -f examples/values-argocd-platform-managed.yaml -f examples/values-argocd-three-replicas.yaml
 ```
 
 To also run the fresh-install / upgrade / uninstall race test against an
@@ -363,6 +388,27 @@ bash tests/chart-tests.sh
 
 The test uses disposable chart-managed PostgreSQL/Redis. With its default cleanup setting it deletes all PVCs in the selected namespace and then deletes that namespace. Use a unique disposable name; set `AFFINE_CLUSTER_CLEANUP=0` to inspect before deliberate cleanup. Never point it at shared or production infrastructure.
 
+For the opt-in three-replica trial (separate namespace, requires three
+schedulable nodes and a ReadWriteMany storage class; it refuses to reuse an
+existing release):
+
+```bash
+AFFINE_CLUSTER_MULTI_TEST=1 \
+AFFINE_CLUSTER_MULTI_CONTEXT=tbs-dev \
+AFFINE_CLUSTER_MULTI_NAMESPACE="affine-multi-test" \
+AFFINE_CLUSTER_MULTI_RELEASE="affine-multi-test" \
+bash tests/chart-tests.sh
+```
+
+It asserts both application claims `Bound ReadWriteMany`, three Ready pods on
+three distinct nodes, exactly one succeeded migration Job before the
+application containers started, no `Multi-Attach`/`FailedAttachVolume` events,
+an identical `private.key` digest in all three pods (before and after a rolling
+restart), stable PVC/Job/pod UIDs across an identical upgrade, one rotation on a
+deliberate migration PodTemplate change, and — with
+`AFFINE_CLUSTER_MULTI_POLICY=1` (default) — that the staged kgateway
+`BackendConfigPolicy` reports `Accepted=True`/`Attached=True`.
+
 ## Release
 
 Update `Chart.yaml` (version + app version), the migration pod-template inputs
@@ -378,6 +424,7 @@ never a branch.
 
 | Tag | Commit | Highlights |
 | --- | --- | --- |
+| `v0.2.4` | _(release commit)_ | Opt-in `replicaCount>1` (RWX claims, shared config PVC for `private.key`, anti-affinity), `persistence.*.accessMode`, kgateway `BackendConfigPolicy` cookie affinity, three-replica examples, multi-replica cluster trial path |
 | `v0.2.3` | `7191896f` | Optional Ingress TLS (`routing.ingress.tls.enabled`), Argo CD `PreSync` database gate, Job-name checksums for all three Jobs, PVC annotations, `examples/values-argocd-platform-managed.yaml` |
 | `v0.2.2` | `d10856ad` | Safe-by-default Job retention (`jobRetentionSeconds: 0`), full PodTemplate checksum for the migration Job, ReadWriteOnce single-replica guard, `extraEnvFrom`, Profile A values |
 | `v0.2.1` | `1820d743` | Chart as imported into the organisation repository (the four lifecycle fixes are described in the `0.2.1` section of `CHANGELOG.md`) |

@@ -1,0 +1,48 @@
+# Three-replica trial overlay, layered on top of examples/values-dev.yaml:
+#
+#   helm upgrade --install affine-multi . -n affine-multi --create-namespace \
+#     -f examples/values-dev.yaml -f examples/values-three-replicas.yaml
+#
+# This is an operator-tested topology, not an upstream-supported AFFiNE HA
+# claim. It uses the dev profile's single-container PostgreSQL and Redis inside
+# the same disposable namespace; never point it at production data.
+#
+# Contract enforced by the chart guard:
+#   * replicaCount>1 requires application.enabled=true, migration.enabled=true
+#     and ReadWriteMany on both application claims;
+#   * routing.mode=none is allowed (no external route in the trial) -- session
+#     affinity is only required once a gateway route is opened.
+replicaCount: 3
+
+persistence:
+  storage:
+    # All three replicas mount this claim; storage-nvme-c1 must serve RWX.
+    accessMode: ReadWriteMany
+    storageClass: storage-nvme-c1
+  config:
+    # Shared config volume: the migration Job writes private.key once here and
+    # every replica mounts the same file.
+    accessMode: ReadWriteMany
+    storageClass: storage-nvme-c1
+
+migration:
+  # Single migration Job plus the wait-migration gate must run before any
+  # replica starts (also required by the multi-replica guard).
+  enabled: true
+
+# Spread replicas across nodes: co-location would hide a node-local RWX
+# implementation and make a single node failure take the whole release down.
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: affine
+
+# Prove mounts, private.key and the migration gate before exposing a route.
+# To stage kgateway cookie affinity, keep mode=none and add
+# routing.gateway.kgatewayCookieAffinity.enabled=true; switch to
+# routing.mode=gateway only once an HTTPS certificate for routing.host exists.
+routing:
+  mode: none

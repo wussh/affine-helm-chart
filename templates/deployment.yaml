@@ -23,6 +23,9 @@ spec:
     spec:
       serviceAccountName: {{ include "affine.serviceAccountName" . }}
       automountServiceAccountToken: false
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         # Gate startup on the Secret keys the containers reference. The mounted
         # files come from the same kubelet cache that resolves secretKeyRef, so

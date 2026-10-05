@@ -1,0 +1,42 @@
+# Three-replica overlay for the Argo CD / platform-managed profile, layered on
+# top of examples/values-argocd-platform-managed.yaml:
+#
+#   helm template affine-argocd . -n affine-argocd \
+#     -f examples/values-argocd-platform-managed.yaml \
+#     -f examples/values-argocd-three-replicas.yaml
+#
+# First sync uses routing.mode=none with the kgateway cookie-affinity flag on:
+# the BackendConfigPolicy is staged and can be verified (Accepted=True) before
+# any route exists. Open routing.mode=gateway only once an HTTPS certificate
+# for routing.host is actually serving; the multi-replica guard rejects
+# gateway mode without the flag and without an HTTPS config.externalUrl.
+#
+# The base profile already keeps secrets.mode=existing, disables prerequisites
+# and databaseProvisioning, and pins jobRetentionSeconds=0; repeated syncs of
+# an identical revision must not recreate the migration Job or the PVCs.
+replicaCount: 3
+
+persistence:
+  storage:
+    accessMode: ReadWriteMany
+    storageClass: storage-nvme-c1
+  config:
+    accessMode: ReadWriteMany
+    storageClass: storage-nvme-c1
+
+# Spread replicas across nodes (see examples/values-three-replicas.yaml).
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: affine
+
+routing:
+  # none = stage the affinity policy without opening a route. Switch to
+  # gateway only after the certificate exists.
+  mode: none
+  gateway:
+    kgatewayCookieAffinity:
+      enabled: true
