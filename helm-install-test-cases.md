@@ -235,18 +235,37 @@ Non-rotating inputs: `routing.*`, `config.*`, `service.port`,
 `persistence.*.size`, `resources.*`, `probes.*`. The Deployment's
 `EXPECTED_MIGRATION_VERSION` must equal the Job's `MIGRATION_VERSION`.
 
-## TC-12: ReadWriteOnce single-replica guard
+## TC-12: multi-replica opt-in contract
 
 ```sh
-helm template t . -f examples/values-dev.yaml --set replicaCount=2
-# fails: at '/replicaCount': maximum: got 2, want 1
+# replicaCount>1 is an explicit opt-in; each missing requirement fails with its
+# own message, also with --skip-schema-validation.
 helm template t . -f examples/values-dev.yaml --set replicaCount=2 --skip-schema-validation
-# fails: replicaCount=2 is not supported: AFFiNE stores data on ReadWriteOnce
-# claims (persistence.storage/config) and has no multi-replica coordination.
+# fails: replicaCount=2 requires persistence.storage.accessMode=ReadWriteMany ...
+helm template t . -f examples/values-dev.yaml --set replicaCount=2 \
+  --set persistence.storage.accessMode=ReadWriteMany --skip-schema-validation
+# fails: replicaCount=2 requires persistence.config.accessMode=ReadWriteMany ...
+helm template t . -f examples/values-dev.yaml --set replicaCount=2 \
+  --set persistence.storage.accessMode=ReadWriteMany \
+  --set persistence.config.accessMode=ReadWriteMany \
+  --set migration.enabled=false --skip-schema-validation
+# fails: replicaCount=2 requires migration.enabled=true ...
+# Valid multi-replica render (3 replicas, both claims RWX, shared config PVC):
+helm template affine-multi . -n affine-multi \
+  -f examples/values-dev.yaml -f examples/values-three-replicas.yaml \
+  | python3 tests/assert_render.py /dev/stdin --release affine-multi \
+      --replicas 3 --migration-config-pvc --affinity-hostname \
+      --pvc-access-mode -storage=ReadWriteMany \
+      --pvc-access-mode -config=ReadWriteMany
 ```
 
-Pass: both fail, and the second names the ReadWriteOnce storage reason. RWX
-multi-replica is not a supported configuration of this chart.
+Pass: every invalid combination fails naming the missing requirement; the valid
+overlay renders 3 replicas, two ReadWriteMany claims, anti-affinity spread and
+the migration Job's shared config PVC. `routing.mode=ingress` stays rejected for
+multi-replica; gateway mode additionally requires
+`routing.gateway.kgatewayCookieAffinity.enabled=true` and an HTTPS
+`config.externalUrl`. RWX multi-replica remains an operator-tested topology, not
+an upstream-supported AFFiNE HA claim.
 
 ## TC-13: `extraEnvFrom` extension point
 

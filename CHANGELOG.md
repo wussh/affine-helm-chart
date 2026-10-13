@@ -4,6 +4,70 @@ Released versions are annotated git tags `vX.Y.Z` on `main`, each matching the
 section of the same number (see the release section of `README.md`). `0.1.0` and
 `0.2.0` predate the organisation repository and are kept here for history.
 
+## 0.2.4
+
+- Opt-in multi-replica: `replicaCount` is no longer schema-pinned to `1`. Values
+  `> 1` require `application.enabled=true`, `migration.enabled=true`, and
+  `ReadWriteMany` on both `persistence.storage.accessMode` and
+  `persistence.config.accessMode`. The render-time guard names the missing
+  requirement (also with `--skip-schema-validation`): `routing.mode=ingress` is
+  rejected for multi-replica, `routing.mode=gateway` requires
+  `routing.gateway.kgatewayCookieAffinity.enabled=true` plus an HTTPS
+  `config.externalUrl`, and the affinity flag is rejected at one replica and
+  with `routing.mode=ingress`. AFFiNE self-host multi-replica is an
+  operator-tested topology, not an upstream-supported HA claim.
+- New `persistence.storage.accessMode` / `persistence.config.accessMode` values
+  (enum `ReadWriteOnce|ReadWriteMany`, default `ReadWriteOnce`) now drive the
+  rendered PVC `accessModes`. With `create=false` the value is the operator's
+  assertion about the pre-created claim: the schema cannot inspect a live PVC.
+- With `replicaCount>1` the migration Job mounts the shared **config** claim, so
+  the single predeploy run writes/keeps `private.key` on the volume every
+  replica reads; the Job's `storage` volume stays `emptyDir`. With one replica
+  both Job volumes stay `emptyDir` (unchanged behavior). The migration Job
+  checksum therefore rotates when `replicaCount` crosses `1`.
+- New optional top-level `affinity` value: rendered verbatim on the AFFiNE pod
+  template when non-empty (for example pod anti-affinity spreading replicas
+  across nodes).
+- New `routing.gateway.kgatewayCookieAffinity.enabled` flag: renders a
+  `gateway.kgateway.dev/v1alpha1 BackendConfigPolicy` targeting the AFFiNE
+  Service with a consistent-hash cookie (`affine-route-affinity`, path `/`,
+  session TTL `0s`, `HttpOnly`, `Secure`, `SameSite=Lax`, `terminal: true`).
+  Rendered in `routing.mode=none` as well, so the policy can be staged and its
+  `Accepted` condition verified before the HTTPRoute is opened. The installed
+  Gateway API CRDs have no `HTTPRoute.spec.rules.sessionPersistence` field and
+  it is not used; consistent hashing is soft affinity, so clients reconnect when
+  the backend set changes.
+- New examples: `examples/values-three-replicas.yaml` (dev overlay: 3 replicas,
+  both claims RWX on `storage-nvme-c1`, required anti-affinity on
+  `kubernetes.io/hostname`) and `examples/values-argocd-three-replicas.yaml`
+  (platform-managed overlay with the policy staged in `routing.mode=none`).
+- Tests: static suite grew from 64 to 79 checks (multi-replica contract
+  failures, RWO/RWX claim assertions, migration config-volume assertions,
+  policy present/absent and cookie attributes, HTTPRoute presence, three-replica
+  and Argo CD overlays). New opt-in cluster path `AFFINE_CLUSTER_MULTI_TEST=1`
+  (separate namespace; refuses to reuse an existing release) asserts Bound RWX
+  claims, three Ready pods on three distinct nodes, one succeeded migration Job
+  before any application container started, identical `private.key` digests,
+  no `Multi-Attach`, stable PVC/Job/pod UIDs across an identical upgrade, one
+  Job rotation on a deliberate migration PodTemplate change, a rolling restart
+  with unchanged key digest, and `Accepted=True`/`Attached=True` on the staged
+  kgateway policy.
+- Upgrade note: the `helm.sh/chart` label is part of the migration pod template
+  checksum, so the `0.2.3` -> `0.2.4` chart-version bump rotates the migration
+  Job name **once** even for a single-replica release (the migration re-runs
+  idempotently against the existing database and writes the new marker). Review
+  the diff and take a consistent PostgreSQL backup before upgrading; do not
+  expect byte-identical manifests across chart versions.
+- Evidence: the opt-in three-replica trial (`AFFINE_CLUSTER_MULTI_TEST=1`)
+  passed 28/28 cluster checks on `tbs-dev` on 2026-10-02 (disposable namespace,
+  chart-managed dev PostgreSQL/Redis, Trident `storage-nvme-c1`): Bound RWX
+  claims, three Ready pods on three distinct nodes, gate ordering, identical
+  `private.key` digests, idempotent upgrades with stable UIDs, one Job rotation
+  on a deliberate PodTemplate change, policy `Accepted=True`/`Attached=True`
+  staged without pod restarts, and a clean rolling restart. The HTTPS gateway
+  cookie/Socket.IO polling checks remain pending: `tbs-dev` has no
+  `ClusterIssuer`.
+
 ## 0.2.3
 
 - Optional Ingress TLS: `routing.ingress.tls.enabled` (default `true`). With

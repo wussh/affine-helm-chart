@@ -9,7 +9,7 @@
 # fails fast with a readable explanation instead of rendering broken manifests.
 #
 # Option index (all keys are validated against values.schema.json):
-#   replicaCount                      AFFiNE pod count (fixed at 1)
+#   replicaCount                      AFFiNE pod count (1; >1 is an opt-in)
 #   application.enabled               render the AFFiNE Deployment/Service
 #   migration.enabled                 render the migration Job + wait gate
 #   jobRetentionSeconds               TTL for finished Jobs
@@ -27,9 +27,15 @@
 #   config.*                          AFFiNE server config.json values
 # =============================================================================
 
-# Number of AFFiNE replicas. Intentionally fixed at 1: AFFiNE is stateful
-# behind a ReadWriteOnce storage claim and the chart does not support
-# multi-replica coordination. Schema enforces minimum=1, maximum=1.
+# Number of AFFiNE replicas. Default 1. Values > 1 are an explicit opt-in:
+# the chart then requires application.enabled=true, migration.enabled=true,
+# both persistence.*.accessMode=ReadWriteMany (every replica mounts the same
+# claims), and -- with routing.mode=gateway -- the kgateway cookie-affinity
+# flag below plus an HTTPS config.externalUrl. Session affinity is best-effort
+# (consistent hashing): a backend-set change can force a Socket.IO reconnect,
+# but data stays consistent because all replicas share PostgreSQL, Redis and
+# the RWX claims. AFFiNE self-host multi-replica is not an upstream-supported
+# topology; treat >1 as an operator-tested configuration. See docs/design.md.
 replicaCount: 1
 
 # Render the AFFiNE Deployment and its Service. When false the chart deploys
@@ -282,6 +288,12 @@ securityContext:
 #     - secretRef:    {name: affine-extra-runtime, optional: true}
 extraEnvFrom: []
 
+# Optional pod scheduling constraints for the AFFiNE Deployment (for example a
+# podAntiAffinity spreading replicas across nodes). Rendered verbatim when
+# non-empty; with replicaCount>1 use it when the RWX volume backend requires
+# replicas on distinct nodes. Empty -> no affinity stanza is rendered.
+affinity: {}
+
 # AFFiNE storage and config claims.
 #   create=true  -> chart renders the PVC (named <release>-storage /
 #                   <release>-config unless existingClaim is set).
@@ -292,6 +304,11 @@ persistence:
     # Uploaded files and application data.
     create: true
     existingClaim: ""
+    # Access mode of the claim. replicaCount>1 requires ReadWriteMany on both
+    # persistence.storage and persistence.config, because every replica mounts
+    # the same claims. With create=false this value is the operator's assertion
+    # about the pre-created claim (the schema cannot inspect a live PVC).
+    accessMode: ReadWriteOnce
     retain: true
     size: 20Gi
     storageClass: storage-nvme-c1
@@ -302,6 +319,10 @@ persistence:
     # AFFiNE config directory (config.json is mounted from a ConfigMap here).
     create: true
     existingClaim: ""
+    # Same contract as persistence.storage.accessMode; also ReadWriteMany when
+    # replicaCount>1, because the migration Job and every replica must see the
+    # same private.key written once by predeploy.
+    accessMode: ReadWriteOnce
     retain: true
     size: 1Gi
     storageClass: storage-nvme-c1
@@ -364,6 +385,15 @@ routing:
     namespace: kgateway-system
     httpSectionName: http
     httpsSectionName: https
+    # kgateway session affinity for multi-replica installs. When enabled the
+    # chart renders a gateway.kgateway.dev/v1alpha1 BackendConfigPolicy that
+    # adds a consistent-hash cookie to the AFFiNE Service, so Socket.IO
+    # polling sessions stay on one replica. Requires replicaCount>1; valid
+    # with routing.mode=gateway and with routing.mode=none (stage the policy
+    # before opening the route). Rejected with routing.mode=ingress, which has
+    # no affinity implementation in this chart.
+    kgatewayCookieAffinity:
+      enabled: false
 
 # Argo CD integration helpers.
 #

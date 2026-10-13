@@ -426,10 +426,12 @@ spec:
           valueFrom: {secretKeyRef: {name: {{ include "affine.redisSecretName" . }}, key: REDIS_SERVER_DATABASE}}
       resources: {{- toYaml .Values.migrationResources | nindent 8 }}
       securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
-      # config/storage are node-local emptyDirs, not the ReadWriteOnce PVCs the
-      # Deployment holds: predeploy touches only the database, and mounting the
-      # shared claims deadlocks the release (migration waits for a volume the
-      # app pod already holds while the app waits for migration to finish).
+      # storage is always a node-local emptyDir: predeploy touches only the
+      # database, and with replicaCount=1 the app claims are ReadWriteOnce.
+      # config becomes the shared RWX PVC when replicaCount>1, so the single
+      # predeploy run writes/keeps private.key on the volume every replica
+      # mounts; with one replica it stays an emptyDir (the key is created
+      # inside each pod when the file is absent).
       volumeMounts:
         - {name: tmp, mountPath: /tmp}
         - {name: storage, mountPath: /root/.affine/storage}
@@ -457,10 +459,20 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       volumeMounts: [{name: tmp, mountPath: /tmp}]
   volumes:
-    # emptyDir, not the PVCs: the migrate initContainer must be schedulable on
-    # any node without contending for the Deployment's ReadWriteOnce claims.
+    # storage stays an emptyDir: the migrate initContainer must be schedulable
+    # on any node without contending for the application claims (ReadWriteOnce
+    # with a single replica).
     - {name: storage, emptyDir: {}}
+    {{- if gt (int .Values.replicaCount) 1 }}
+    # replicaCount>1: the migration run is the single writer of
+    # $HOME/.affine/config/private.key, so it must mount the same RWX config
+    # claim the application pods mount (guard enforces ReadWriteMany).
+    - name: config
+      persistentVolumeClaim:
+        claimName: {{ include "affine.configClaimName" . }}
+    {{- else }}
     - {name: config,  emptyDir: {}}
+    {{- end }}
     - {name: tmp,     emptyDir: {medium: Memory}}
     - name: database-secret-wait
       secret:
@@ -550,8 +562,41 @@ always runs, including with default values.
 {{- if not (has .Values.secrets.mode (list "create" "existing")) -}}
 {{- fail (printf "secrets.mode=%q is invalid; must be \"create\" or \"existing\"" .Values.secrets.mode) -}}
 {{- end -}}
-{{- if gt (int .Values.replicaCount) 1 -}}
-{{- fail (printf "replicaCount=%d is not supported: AFFiNE stores data on ReadWriteOnce claims (persistence.storage/config) and has no multi-replica coordination. Set replicaCount=1." (int .Values.replicaCount)) -}}
+{{- $multiReplica := gt (int .Values.replicaCount) 1 -}}
+{{- $cookieAffinity := .Values.routing.gateway.kgatewayCookieAffinity.enabled -}}
+{{- if lt (int .Values.replicaCount) 1 -}}
+{{- fail (printf "replicaCount=%d is invalid: must be at least 1" (int .Values.replicaCount)) -}}
+{{- end -}}
+{{- if and $cookieAffinity (eq .Values.routing.mode "ingress") -}}
+{{- fail "routing.gateway.kgatewayCookieAffinity.enabled=true is not supported with routing.mode=ingress: the nginx Ingress does not read gateway.kgateway.dev BackendConfigPolicy. Use routing.mode=gateway (with an HTTPS config.externalUrl), or routing.mode=none to stage the policy before opening the route." -}}
+{{- end -}}
+{{- if $multiReplica -}}
+  {{- if not .Values.application.enabled -}}
+    {{- fail (printf "replicaCount=%d requires application.enabled=true" (int .Values.replicaCount)) -}}
+  {{- end -}}
+  {{- if not .Values.migration.enabled -}}
+    {{- fail (printf "replicaCount=%d requires migration.enabled=true: one migration Job plus the wait-migration gate must run before any replica starts" (int .Values.replicaCount)) -}}
+  {{- end -}}
+  {{- range $pair := list (dict "name" "persistence.storage" "claim" .Values.persistence.storage) (dict "name" "persistence.config" "claim" .Values.persistence.config) -}}
+    {{- if ne (toString $pair.claim.accessMode) "ReadWriteMany" -}}
+      {{- fail (printf "replicaCount=%d requires %s.accessMode=ReadWriteMany (got %q): every replica mounts the same claim, and a ReadWriteOnce volume attaches to a single node. Set it to the claim's real access mode; with create=false it is the operator's assertion about the pre-created PVC." (int $.Values.replicaCount) $pair.name (toString $pair.claim.accessMode)) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if eq .Values.routing.mode "ingress" -}}
+    {{- fail (printf "replicaCount=%d with routing.mode=ingress is not supported: this chart implements multi-replica session affinity only through the kgateway BackendConfigPolicy. Use routing.mode=gateway with routing.gateway.kgatewayCookieAffinity.enabled=true, or routing.mode=none." (int .Values.replicaCount)) -}}
+  {{- end -}}
+  {{- if eq .Values.routing.mode "gateway" -}}
+    {{- if not $cookieAffinity -}}
+      {{- fail (printf "replicaCount=%d with routing.mode=gateway requires routing.gateway.kgatewayCookieAffinity.enabled=true: AFFiNE clients use Socket.IO polling, which needs sticky sessions across replicas." (int .Values.replicaCount)) -}}
+    {{- end -}}
+    {{- if not (hasPrefix "https://" (toString .Values.config.externalUrl)) -}}
+      {{- fail (printf "replicaCount=%d with routing.mode=gateway requires an HTTPS config.externalUrl (got %q): the affinity cookie is marked Secure, so a plaintext URL would drop it." (int .Values.replicaCount) (toString .Values.config.externalUrl)) -}}
+    {{- end -}}
+  {{- end -}}
+{{- else -}}
+  {{- if $cookieAffinity -}}
+    {{- fail "routing.gateway.kgatewayCookieAffinity.enabled=true requires replicaCount>1: a single replica needs no session affinity. Remove the flag or raise replicaCount." -}}
+  {{- end -}}
 {{- end -}}
 {{- if .Values.argocd.databaseGate.enabled -}}
   {{- if ne .Values.secrets.mode "existing" -}}

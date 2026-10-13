@@ -14,7 +14,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [{{ .Values.persistence.storage.accessMode }}]
   storageClassName: {{ .Values.persistence.storage.storageClass }}
   resources:
     requests: {storage: {{ .Values.persistence.storage.size }}}
@@ -35,7 +35,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [{{ .Values.persistence.config.accessMode }}]
   storageClassName: {{ .Values.persistence.config.storageClass }}
   resources:
     requests: {storage: {{ .Values.persistence.config.size }}}

@@ -55,7 +55,12 @@ while i < len(args):
         flags.add(a)
         i += 2
         continue
-    if a in ("--job-ttl-equals", "--extra-envfrom", "--pvc-annotation"):
+    if a == "--replicas":
+        values[a] = args[i + 1]
+        flags.add(a)
+        i += 2
+        continue
+    if a in ("--job-ttl-equals", "--extra-envfrom", "--pvc-annotation", "--pvc-access-mode"):
         values.setdefault(a, []).append(args[i + 1])
         flags.add(a)
         i += 2
@@ -221,17 +226,30 @@ if "--workloads" in flags:
             env = {e["name"]: e for e in migrate.get("env") or []}
             if "DATABASE_URL" not in env or "secretKeyRef" not in env["DATABASE_URL"].get("valueFrom", {}):
                 fail("migrate initContainer does not reference DATABASE_URL via secretKeyRef")
-        # The migration Job must not hold the Deployment's ReadWriteOnce claims: the
-        # app pod attaches them, then waits for migration to finish, so a shared
-        # claim deadlocks the release with a Multi-Attach error on the other pod.
+        # The migration Job must not hold the Deployment's storage claim: with
+        # replicaCount=1 the app claims are ReadWriteOnce and a shared claim
+        # deadlocks the release (the app pod attaches it and then waits for
+        # migration, while the Job waits for the volume). The config claim is
+        # mounted only when replicaCount>1: there it is the shared RWX volume
+        # the single predeploy run writes private.key to.
+        multi = False
+        if "--replicas" in flags:
+            try:
+                multi = int(values["--replicas"]) > 1
+            except ValueError:
+                fail(f"--replicas expects an integer, got {values['--replicas']!r}")
         pvc_claims = {
             v["persistentVolumeClaim"].get("claimName")
             for v in m["spec"]["template"]["spec"].get("volumes") or []
             if "persistentVolumeClaim" in v
         }
         for claim in pvc_claims:
-            if claim and claim.endswith(("-storage", "-config")):
-                fail(f"migration Job mounts the Deployment's storage/config PVC: {claim}")
+            if not claim:
+                continue
+            if claim.endswith("-storage"):
+                fail(f"migration Job mounts the Deployment's storage PVC: {claim}")
+            if claim.endswith("-config") and not multi:
+                fail(f"migration Job mounts the config PVC with replicaCount=1: {claim}")
 
 if "--readonly-secret" in flags:
     # secrets.mode=existing without the explicit allowBootstrapPatch opt-in:
@@ -543,6 +561,135 @@ if "--pvc-annotation" in flags:
             fail(f"annotation {key} is "
                  f"{sorted(c['metadata']['annotations'][key] for c in carried)!r}, "
                  f"expected {want!r}")
+
+if "--replicas" in flags:
+    # The rendered Deployment must carry the configured replica count; a
+    # silent fallback to 1 would hide a broken multi-replica opt-in.
+    try:
+        want = int(values["--replicas"])
+    except ValueError:
+        fail(f"--replicas expects an integer, got {values['--replicas']!r}")
+    else:
+        apps = [d for d in by_kind("Deployment")
+                if (d.get("metadata", {}).get("labels") or {}).get("app.kubernetes.io/name") == "affine"
+                and (release is None or (d.get("metadata", {}).get("labels") or {}).get("app.kubernetes.io/instance") == release)]
+        if len(apps) != 1:
+            fail(f"expected exactly one AFFiNE Deployment for --replicas, found {len(apps)}")
+        elif apps[0]["spec"].get("replicas") != want:
+            fail(f"Deployment/{apps[0]['metadata']['name']} replicas="
+                 f"{apps[0]['spec'].get('replicas')!r}, expected {want}")
+
+if "--pvc-access-mode" in flags:
+    # SUFFIX=MODE entries: every rendered claim whose name ends with SUFFIX must
+    # carry exactly that access mode. Guards the contract that multi-replica
+    # uses ReadWriteMany for both application claims and ReadWriteOnce stays on
+    # the prerequisite claims.
+    claims = by_kind("PersistentVolumeClaim")
+    for entry in values["--pvc-access-mode"]:
+        if "=" not in entry:
+            fail(f"--pvc-access-mode expects SUFFIX=MODE, got {entry!r}")
+            continue
+        suffix, want = entry.split("=", 1)
+        matched = [c for c in claims if c["metadata"]["name"].endswith(suffix)]
+        if not matched:
+            fail(f"no PVC ending with {suffix!r} rendered "
+                 f"(claims: {sorted(c['metadata']['name'] for c in claims)})")
+        for c in matched:
+            got = c["spec"].get("accessModes")
+            if got != [want]:
+                fail(f"PVC/{c['metadata']['name']} accessModes={got!r}, expected [{want!r}]")
+
+if "--migration-config-pvc" in flags or "--migration-config-emptydir" in flags:
+    # The migration Job's config volume decides whether private.key is written
+    # once on a shared volume (multi-replica) or per-pod (single replica).
+    migs = [j for j in by_kind("Job") if "-migration-" in j.get("metadata", {}).get("name", "")]
+    if len(migs) != 1:
+        fail(f"expected exactly one migration Job, found {[j['metadata']['name'] for j in migs]}")
+    else:
+        vols = {v.get("name"): v for v in migs[0]["spec"]["template"]["spec"].get("volumes") or []}
+        cfg = vols.get("config") or {}
+        if "--migration-config-pvc" in flags:
+            claim = (cfg.get("persistentVolumeClaim") or {}).get("claimName")
+            if not claim or not claim.endswith("-config"):
+                fail(f"migration Job config volume is not the shared config PVC: {cfg}")
+        if "--migration-config-emptydir" in flags and "emptyDir" not in cfg:
+            fail(f"migration Job config volume is not an emptyDir with replicaCount=1: {cfg}")
+        if "emptyDir" not in (vols.get("storage") or {}):
+            fail("migration Job storage volume must stay an emptyDir")
+
+if "--no-affinity" in flags:
+    # Empty values.affinity must not render a stray affinity stanza.
+    for d in by_kind("Deployment"):
+        if (d.get("metadata", {}).get("labels") or {}).get("app.kubernetes.io/name") != "affine":
+            continue
+        if "affinity" in (d.get("spec", {}).get("template", {}).get("spec") or {}):
+            fail(f"Deployment/{d['metadata']['name']} renders an affinity stanza from empty values.affinity")
+
+if "--affinity-hostname" in flags:
+    # Multi-replica overlay contract: affine pods must be spread across nodes
+    # (hostname) with the selector label, so a node-local RWX implementation or
+    # node failure cannot silently co-locate all replicas.
+    apps = [d for d in by_kind("Deployment")
+            if (d.get("metadata", {}).get("labels") or {}).get("app.kubernetes.io/name") == "affine"
+            and (release is None or (d.get("metadata", {}).get("labels") or {}).get("app.kubernetes.io/instance") == release)]
+    if len(apps) != 1:
+        fail(f"expected exactly one AFFiNE Deployment for --affinity-hostname, found {len(apps)}")
+    else:
+        spec = apps[0]["spec"]["template"]["spec"]
+        terms = (((spec.get("affinity") or {}).get("podAntiAffinity") or {})
+                 .get("requiredDuringSchedulingIgnoredDuringExecution") or [])
+        ok = any(
+            t.get("topologyKey") == "kubernetes.io/hostname"
+            and ((t.get("labelSelector") or {}).get("matchLabels") or {}).get("app.kubernetes.io/name") == "affine"
+            for t in terms
+        )
+        if not ok:
+            fail("Deployment podAntiAffinity does not require spreading affine pods by kubernetes.io/hostname")
+
+if "--policy-affinity" in flags:
+    # The kgateway BackendConfigPolicy must target the release Service and hash
+    # on the session cookie with the exact attributes the guard promises:
+    # browser-session TTL, HttpOnly, Secure, SameSite=Lax, terminal.
+    pols = by_kind("BackendConfigPolicy")
+    if len(pols) != 1:
+        fail(f"expected exactly one BackendConfigPolicy, found {[p['metadata']['name'] for p in pols]}")
+    else:
+        pol = pols[0]
+        if pol.get("apiVersion") != "gateway.kgateway.dev/v1alpha1":
+            fail(f"BackendConfigPolicy/{pol['metadata']['name']} apiVersion={pol.get('apiVersion')!r}, "
+                 "expected gateway.kgateway.dev/v1alpha1")
+        if release and pol["metadata"]["name"] != f"{release}-affinity":
+            fail(f"BackendConfigPolicy name={pol['metadata']['name']!r}, expected {release}-affinity")
+        refs = pol["spec"].get("targetRefs") or []
+        if len(refs) != 1:
+            fail(f"BackendConfigPolicy must target exactly one object, got {refs}")
+        elif release and {k: refs[0].get(k) for k in ("group", "kind", "name")} != {
+                "group": "", "kind": "Service", "name": release}:
+            fail(f"BackendConfigPolicy targetRefs[0]={refs[0]}, "
+                 f"expected Service/{release} in group ''")
+        policies = (((pol["spec"].get("loadBalancer") or {}).get("ringHash") or {})
+                    .get("hashPolicies") or [])
+        if len(policies) != 1:
+            fail(f"BackendConfigPolicy must carry exactly one hash policy, got {len(policies)}")
+        else:
+            hp = policies[0]
+            cookie = hp.get("cookie") or {}
+            expect = {"name": "affine-route-affinity", "path": "/", "ttl": "0s",
+                      "httpOnly": True, "secure": True, "sameSite": "Lax"}
+            got = {k: cookie.get(k) for k in expect}
+            if got != expect:
+                fail(f"BackendConfigPolicy cookie={got}, expected {expect}")
+            if hp.get("terminal") is not True:
+                fail(f"BackendConfigPolicy hash policy terminal={hp.get('terminal')!r}, expected True")
+
+if "--policy-absent" in flags and by_kind("BackendConfigPolicy"):
+    fail(f"no BackendConfigPolicy expected, found "
+         f"{[p['metadata']['name'] for p in by_kind('BackendConfigPolicy')]}")
+
+if "--httproute-present" in flags and not by_kind("HTTPRoute"):
+    fail("expected an HTTPRoute to be rendered")
+if "--no-httproute" in flags and by_kind("HTTPRoute"):
+    fail(f"no HTTPRoute expected, found {[r['metadata']['name'] for r in by_kind('HTTPRoute')]}")
 
 dcs = by_kind("DatabaseCluster")
 if "--databasecluster" in flags and not dcs:
